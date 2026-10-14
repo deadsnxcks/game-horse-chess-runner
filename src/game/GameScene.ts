@@ -70,14 +70,17 @@ const MARK_COLOR = 0x000000;
 const MARK_ALPHA = 0.25;
 const KNIGHT_SQUARE_COLOR = 0xcdd26a;
 const BAND_COLOR = 0xd63b3b;
+/** Экран паузы непрозрачный: иначе паузой можно бесплатно думать над доской, пока экран стоит. */
+const PAUSE_COLOR = 0x111827;
 
 /**
  * ready   — ждём первый ход, экран стоит;
  * playing — экран едет, можно ходить;
+ * paused  — пауза: экран стоит, доску не видно, тап = продолжить;
  * dying   — вражеская фигура едет рубить коня;
  * over    — экран проигрыша, тап = заново.
  */
-type State = 'ready' | 'playing' | 'dying' | 'over';
+type State = 'ready' | 'playing' | 'paused' | 'dying' | 'over';
 
 const cellKey = (col: number, row: number) => `${col},${row}`;
 
@@ -96,6 +99,10 @@ export class GameScene extends Phaser.Scene {
   private knight!: Phaser.GameObjects.Text;
   private knightSquare!: Phaser.GameObjects.Rectangle;
   private scoreText!: Phaser.GameObjects.Text;
+  /** Кнопка паузы: [0] — область нажатия, остальное — две палочки значка. */
+  private pauseButton: Phaser.GameObjects.Rectangle[] = [];
+  /** Объекты экрана паузы — удаляем, когда игра продолжается. */
+  private pauseViews: Phaser.GameObjects.GameObject[] = [];
   private moveMarks: Phaser.GameObjects.Arc[] = [];
   /** Картинки фигур по клетке — чтобы убрать съеденную или повести атакующую. */
   private pieceViews = new Map<string, Phaser.GameObjects.Text>();
@@ -117,6 +124,7 @@ export class GameScene extends Phaser.Scene {
     this.score = 0;
     this.elapsed = 0;
     this.moveMarks = [];
+    this.pauseViews = [];
     this.pieceViews = new Map();
     this.rowViews = new Map();
 
@@ -128,6 +136,14 @@ export class GameScene extends Phaser.Scene {
     this.showMoves();
 
     this.input.on('pointerdown', this.handleTap, this);
+    this.input.keyboard?.on('keydown-ESC', this.togglePause, this); // пауза с клавиатуры на компьютере
+
+    // Свернул вкладку или переключился в другое приложение — ставим паузу.
+    // game.events живёт дольше сцены, поэтому при рестарте снимаем подписку, иначе они накопятся.
+    this.game.events.on(Phaser.Core.Events.HIDDEN, this.pauseGame, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.game.events.off(Phaser.Core.Events.HIDDEN, this.pauseGame, this);
+    });
   }
 
   update(_time: number, delta: number): void {
@@ -278,12 +294,21 @@ export class GameScene extends Phaser.Scene {
     this.moveMarks = [];
   }
 
-  private handleTap(pointer: Phaser.Input.Pointer): void {
+  /** over — список интерактивных объектов под пальцем (у нас это только кнопка паузы). */
+  private handleTap(pointer: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]): void {
     if (this.state === 'over') {
       if (this.time.now >= this.restartAllowedAt) this.scene.restart();
       return;
     }
     if (this.state === 'dying') return;
+    if (this.state === 'paused') {
+      this.resumeGame(); // на паузе любой тап — продолжить
+      return;
+    }
+    if (over.includes(this.pauseButton[0])) {
+      this.pauseGame(); // тап по кнопке паузы — не ход
+      return;
+    }
 
     // worldX/worldY — координаты в мире с учётом сдвига камеры (x/y — просто точка на экране)
     const col = Math.floor(pointer.worldX / CELL);
@@ -293,7 +318,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private moveKnight(to: Cell): void {
-    if (this.state === 'ready') this.state = 'playing'; // экран поедет после первого хода
+    if (this.state === 'ready') {
+      this.state = 'playing'; // экран поедет после первого хода
+      for (const part of this.pauseButton) part.setVisible(true); // до первого хода ставить на паузу нечего
+    }
 
     // 1. Взятие: прыгнул на фигуру — съел её
     const eaten = this.board.get(to.col, to.row);
@@ -402,11 +430,60 @@ export class GameScene extends Phaser.Scene {
       .rectangle(GAME_WIDTH / 2, GAME_HEIGHT - DEATH_BAND / 2, GAME_WIDTH, DEATH_BAND, BAND_COLOR, 0.55)
       .setScrollFactor(0)
       .setDepth(DEPTH.band);
+
+    this.createPauseButton();
+  }
+
+  /** Кнопка паузы в правом углу плашки: квадрат под палец и значок из двух палочек. */
+  private createPauseButton(): void {
+    const x = GAME_WIDTH - HUD_HEIGHT / 2;
+    const y = HUD_HEIGHT / 2;
+    const hitArea = this.add
+      .rectangle(x, y, HUD_HEIGHT, HUD_HEIGHT, 0xffffff, 0.15)
+      .setInteractive({ useHandCursor: true });
+    const leftBar = this.add.rectangle(x - 9, y, 10, 32, 0xffffff);
+    const rightBar = this.add.rectangle(x + 9, y, 10, 32, 0xffffff);
+
+    this.pauseButton = [hitArea, leftBar, rightBar];
+    for (const part of this.pauseButton) {
+      // Невидимая кнопка не ловит тапы — до первого хода её как будто нет
+      part.setScrollFactor(0).setDepth(DEPTH.hud).setVisible(false);
+    }
+  }
+
+  // ───────────── Пауза ─────────────
+
+  /** Только во время игры: до первого хода и после проигрыша ставить на паузу нечего. */
+  private pauseGame(): void {
+    if (this.state !== 'playing') return;
+    this.state = 'paused'; // update() крутит экран только в 'playing' — значит, всё встало
+
+    this.pauseViews = [
+      this.add
+        .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, PAUSE_COLOR)
+        .setScrollFactor(0)
+        .setDepth(DEPTH.ui),
+      this.addCenteredText(GAME_HEIGHT * 0.42, 'Пауза', 64),
+      this.addCenteredText(GAME_HEIGHT * 0.52, 'Тапни, чтобы продолжить', 34),
+    ];
+  }
+
+  private resumeGame(): void {
+    if (this.state !== 'paused') return;
+    for (const view of this.pauseViews) view.destroy();
+    this.pauseViews = [];
+    this.state = 'playing';
+  }
+
+  private togglePause(): void {
+    if (this.state === 'paused') this.resumeGame();
+    else this.pauseGame();
   }
 
   private gameOver(reason: string): void {
     this.state = 'over';
     this.clearMoves();
+    for (const part of this.pauseButton) part.setVisible(false); // после проигрыша пауза не нужна
     this.restartAllowedAt = this.time.now + RESTART_DELAY_MS;
     const best = this.saveBestScore();
 
@@ -420,8 +497,8 @@ export class GameScene extends Phaser.Scene {
     this.addCenteredText(GAME_HEIGHT * 0.64, 'Тапни, чтобы начать заново', 34);
   }
 
-  private addCenteredText(y: number, text: string, size: number): void {
-    this.add
+  private addCenteredText(y: number, text: string, size: number): Phaser.GameObjects.Text {
+    return this.add
       .text(GAME_WIDTH / 2, y, text, {
         fontFamily: UI_FONT,
         fontSize: `${size}px`,
