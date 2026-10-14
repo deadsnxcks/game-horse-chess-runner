@@ -20,21 +20,23 @@ body,
 
 body {
   overflow: hidden;
+  /* Телефон: не зумить страницу от частых тапов и не обновлять её свайпом вниз */
+  touch-action: none;
+  overscroll-behavior: none;
+  /* Без выделения текста долгим нажатием и синей вспышки при тапе */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-#app {
-  display: grid;
-  place-items: center;
-  padding: 16px;
-}
-
+/*
+ * Блок игры жёстко равен экрану. Phaser (Scale.FIT) вписывает в него вертикальный холст
+ * и центрирует. Размер задаём через fixed, а не через проценты в grid: иначе высоту
+ * блока определяет сам холст, и игра вылезает за экран телефона.
+ */
 #game {
-  width: min(100%, 960px);
-  height: min(100%, 640px);
-  min-height: 320px;
-  border-radius: 12px;
-  overflow: hidden;
-  box-shadow: 0 12px 48px rgb(0 0 0 / 35%);
+  position: fixed;
+  inset: 0;
 }
 
 canvas {
