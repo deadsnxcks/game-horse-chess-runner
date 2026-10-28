@@ -5,11 +5,10 @@
  */
 import {
   COLS,
-  ENEMY_CHANCE_GROWTH,
-  ENEMY_CHANCE_MAX,
-  ENEMY_CHANCE_START,
-  ENEMY_WEIGHTS,
+  PATH_GUARD_ABOVE,
+  PATH_GUARD_BELOW,
   SAFE_ROWS,
+  type PhaseSettings,
 } from './constants';
 
 /** Вражеские фигуры. Конь игрока на доске не лежит — его клетку хранит сцена. */
@@ -86,28 +85,123 @@ export class Board {
   }
 }
 
-/** Содержимое нового ряда: чем выше ряд, тем гуще фигуры. */
-export function generateRow(row: number, random: () => number = Math.random): (EnemyType | null)[] {
+/** Ходы коня вверх — из них складывается безопасная дорожка. */
+const PATH_STEPS: readonly Offset[] = [
+  [1, 2],
+  [-1, 2],
+  [2, 1],
+  [-2, 1],
+];
+
+/**
+ * Невидимая безопасная дорожка: цепочка ходов коня от старта вверх.
+ * Генератор не ставит фигуры на её клетки и не ставит фигуры, которые их бьют, —
+ * поэтому через любую «стену» из ладей и ферзей всегда есть проход. Найти его — головоломка.
+ */
+export class SafePath {
+  /** Дорожка поднимается на 1–2 ряда за шаг, поэтому в ряду не больше одной её клетки: ряд → колонка. */
+  private cols = new Map<number, number>();
+  private tip: Cell;
+
+  constructor(start: Cell) {
+    this.tip = start;
+    this.cols.set(start.row, start.col);
+  }
+
+  has(col: number, row: number): boolean {
+    return this.cols.get(row) === col;
+  }
+
+  /** Продлеваем дорожку случайными ходами коня вверх, пока она не дойдёт до ряда row. */
+  extendTo(row: number, random: () => number): void {
+    while (this.tip.row < row) {
+      const options = PATH_STEPS.map(([dc, dr]) => ({ col: this.tip.col + dc, row: this.tip.row + dr }))
+        .filter((cell) => cell.col >= 0 && cell.col < COLS);
+      this.tip = options[Math.floor(random() * options.length)];
+      this.cols.set(this.tip.row, this.tip.col);
+    }
+  }
+
+  /** Клетки дорожки в рядах from..to. */
+  cellsInRows(from: number, to: number): Cell[] {
+    const cells: Cell[] = [];
+    for (let row = from; row <= to; row++) {
+      const col = this.cols.get(row);
+      if (col !== undefined) cells.push({ col, row });
+    }
+    return cells;
+  }
+}
+
+/**
+ * Создаёт следующий ряд доски и возвращает его. Плотность и состав фигур задаёт фаза (settings):
+ * генератор сам не знает, какая сейчас фаза, — ему передают её настройки.
+ */
+export function generateRow(
+  board: Board,
+  path: SafePath,
+  settings: PhaseSettings,
+  random: () => number = Math.random,
+): (EnemyType | null)[] {
+  const row = board.rowCount;
+  // Дорожку прокладываем заранее — дальше, чем фигуры этого ряда могут до неё достать
+  path.extendTo(row + PATH_GUARD_BELOW, random);
   const cells = new Array<EnemyType | null>(COLS).fill(null);
+  board.addRow(cells); // ряд сразу на доске: фигуры одного ряда закрывают удары друг другу
   if (row < SAFE_ROWS) return cells;
 
-  const chance = Math.min(
-    ENEMY_CHANCE_MAX,
-    ENEMY_CHANCE_START + (row - SAFE_ROWS) * ENEMY_CHANCE_GROWTH,
-  );
   for (let col = 0; col < COLS; col++) {
-    if (random() < chance) cells[col] = pickEnemy(random);
+    if (random() >= settings.enemyChance) continue;
+    const type = pickEnemy(settings.enemyWeights, random);
+    if (!threatensPath(board, path, type, { col, row })) cells[col] = type;
   }
   return cells;
 }
 
-/** Случайная фигура с учётом весов ENEMY_WEIGHTS. */
-function pickEnemy(random: () => number): EnemyType {
-  const types = Object.keys(ENEMY_WEIGHTS) as EnemyType[];
-  const total = types.reduce((sum, type) => sum + ENEMY_WEIGHTS[type], 0);
+/**
+ * Встанет ли фигура на дорожку или будет бить её клетку, когда обе окажутся на экране.
+ * Клетку дорожки на ряду p могут бить фигуры с рядов p − PATH_GUARD_BELOW … p + PATH_GUARD_ABOVE.
+ */
+function threatensPath(board: Board, path: SafePath, type: EnemyType, at: Cell): boolean {
+  if (path.has(at.col, at.row)) return true;
+  return path
+    .cellsInRows(at.row - PATH_GUARD_ABOVE, at.row + PATH_GUARD_BELOW)
+    .some((cell) => attacks(board, type, at, cell));
+}
+
+/**
+ * Бьёт ли фигура type, стоящая на from, клетку to. Фигуры между ними закрывают удар.
+ * Это взгляд «от фигуры»; findAttacker ниже смотрит наоборот — от клетки.
+ */
+export function attacks(board: Board, type: EnemyType, from: Cell, to: Cell): boolean {
+  const dc = to.col - from.col;
+  const dr = to.row - from.row;
+  if (dc === 0 && dr === 0) return false;
+  if (type === 'pawn') return PAWN_ATTACKS.some(([c, r]) => c === dc && r === dr);
+  if (type === 'knight') return KNIGHT_JUMPS.some(([c, r]) => c === dc && r === dr);
+
+  const straight = dc === 0 || dr === 0;
+  const diagonal = Math.abs(dc) === Math.abs(dr);
+  if (type === 'rook' && !straight) return false;
+  if (type === 'bishop' && !diagonal) return false;
+  if (type === 'queen' && !straight && !diagonal) return false;
+
+  // Идём от фигуры к клетке: любая фигура по дороге закрывает удар
+  const stepC = Math.sign(dc);
+  const stepR = Math.sign(dr);
+  for (let c = from.col + stepC, r = from.row + stepR; c !== to.col || r !== to.row; c += stepC, r += stepR) {
+    if (board.get(c, r)) return false;
+  }
+  return true;
+}
+
+/** Случайная фигура с учётом весов. */
+function pickEnemy(weights: Record<EnemyType, number>, random: () => number): EnemyType {
+  const types = Object.keys(weights) as EnemyType[];
+  const total = types.reduce((sum, type) => sum + weights[type], 0);
   let roll = random() * total;
   for (const type of types) {
-    roll -= ENEMY_WEIGHTS[type];
+    roll -= weights[type];
     if (roll < 0) return type;
   }
   return 'pawn';

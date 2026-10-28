@@ -14,6 +14,8 @@ import {
   HUD_HEIGHT,
   LIGHT,
   MOVE_MS,
+  PHASE2_SCORE,
+  PHASES,
   PIECE_SIZE,
   PIECE_VALUE,
   POINTS_PER_ROW,
@@ -24,9 +26,12 @@ import {
   SCROLL_SPEED_START,
   START_COL,
   START_ROW,
+  type Phase,
+  type PhaseSettings,
 } from './constants';
 import {
   Board,
+  SafePath,
   findAttacker,
   generateRow,
   knightMoves,
@@ -41,7 +46,18 @@ const ROWS_AHEAD = 3;
 const ROWS_BEHIND = 2;
 
 /** Слои отрисовки: что поверх чего. */
-const DEPTH = { board: 0, knightSquare: 1, pieces: 2, marks: 3, knight: 4, band: 8, hud: 9, ui: 10 };
+const DEPTH = {
+  board: 0,
+  tint: 0.5, // красноватый оттенок доски в фазе 2 — над клетками, под фигурами
+  knightSquare: 1,
+  pieces: 2,
+  marks: 3,
+  knight: 4,
+  band: 8,
+  hud: 9,
+  banner: 9.5, // надпись «ФАЗА 2» — под экраном паузы и проигрыша
+  ui: 10,
+};
 
 const GLYPH: Record<EnemyType, string> = {
   pawn: '♟',
@@ -72,33 +88,50 @@ const KNIGHT_SQUARE_COLOR = 0xcdd26a;
 const BAND_COLOR = 0xd63b3b;
 /** Экран паузы непрозрачный: иначе паузой можно бесплатно думать над доской, пока экран стоит. */
 const PAUSE_COLOR = 0x111827;
+/** Цвет фазы 2 в плашке и на баннере. */
+const PHASE2_COLOR = '#ffb020';
+/** Красноватый оттенок доски в фазе 2: сразу видно, что правила стали жёстче. */
+const PHASE2_TINT = 0xd63b3b;
+const PHASE2_TINT_ALPHA = 0.16;
+/** Сколько висит баннер «ФАЗА 2», прежде чем растаять. */
+const PHASE_BANNER_MS = 1600;
 
 /**
  * ready   — ждём первый ход, экран стоит;
  * playing — экран едет, можно ходить;
- * paused  — пауза: экран стоит, доску не видно, тап = продолжить;
+ * paused  — пауза: всё заморожено, доску не видно, тап / P / Esc = продолжить;
  * dying   — вражеская фигура едет рубить коня;
  * over    — экран проигрыша, тап = заново.
  */
 type State = 'ready' | 'playing' | 'paused' | 'dying' | 'over';
+/** Из каких состояний можно встать на паузу — и в какое потом вернуться. */
+type PausableState = 'ready' | 'playing';
 
 const cellKey = (col: number, row: number) => `${col},${row}`;
 
 export class GameScene extends Phaser.Scene {
   // Логика (в клетках)
   private board!: Board;
+  private path!: SafePath;
   private state: State = 'ready';
+  /** В какое состояние вернуться после паузы. */
+  private stateBeforePause: PausableState = 'ready';
   private knightCol = START_COL;
   private knightRow = START_ROW;
   private maxRow = START_ROW;
   private score = 0;
+  private phase: Phase = 1;
+  /** Игровое время в секундах: растёт только в update() в состоянии 'playing', на паузе стоит. */
   private elapsed = 0;
+  /** Время браузера (this.time.now), после которого тап на экране проигрыша перезапускает игру. */
   private restartAllowedAt = 0;
 
   // Картинка (в пикселях)
   private knight!: Phaser.GameObjects.Text;
   private knightSquare!: Phaser.GameObjects.Rectangle;
   private scoreText!: Phaser.GameObjects.Text;
+  private phaseText!: Phaser.GameObjects.Text;
+  private phaseTint!: Phaser.GameObjects.Rectangle;
   /** Кнопка паузы: [0] — область нажатия, остальное — две палочки значка. */
   private pauseButton: Phaser.GameObjects.Rectangle[] = [];
   /** Объекты экрана паузы — удаляем, когда игра продолжается. */
@@ -117,11 +150,13 @@ export class GameScene extends Phaser.Scene {
     // При рестарте Phaser переиспользует этот же объект сцены,
     // поэтому всё состояние сбрасываем здесь, а не только в объявлении полей.
     this.board = new Board();
+    this.path = new SafePath({ col: START_COL, row: START_ROW });
     this.state = 'ready';
     this.knightCol = START_COL;
     this.knightRow = START_ROW;
     this.maxRow = START_ROW;
     this.score = 0;
+    this.phase = 1;
     this.elapsed = 0;
     this.moveMarks = [];
     this.pauseViews = [];
@@ -136,7 +171,9 @@ export class GameScene extends Phaser.Scene {
     this.showMoves();
 
     this.input.on('pointerdown', this.handleTap, this);
-    this.input.keyboard?.on('keydown-ESC', this.togglePause, this); // пауза с клавиатуры на компьютере
+    // Пауза с клавиатуры на компьютере: P или Esc переключают игра ⇄ пауза
+    this.input.keyboard?.on('keydown-P', this.togglePause, this);
+    this.input.keyboard?.on('keydown-ESC', this.togglePause, this);
 
     // Свернул вкладку или переключился в другое приложение — ставим паузу.
     // game.events живёт дольше сцены, поэтому при рестарте снимаем подписку, иначе они накопятся.
@@ -151,6 +188,7 @@ export class GameScene extends Phaser.Scene {
 
     const seconds = delta / 1000;
     this.elapsed += seconds;
+    if (this.shouldEnterPhase2()) this.enterPhase2();
 
     this.scrollCamera(seconds);
     this.createRowsAhead();
@@ -159,6 +197,49 @@ export class GameScene extends Phaser.Scene {
     if (this.knightScreenY() > GAME_HEIGHT - DEATH_BAND) {
       this.gameOver('Экран догнал коня');
     }
+  }
+
+  /** Настройки текущей фазы: плотность и состав фигур, скорость экрана. Все — в constants.ts. */
+  private get settings(): PhaseSettings {
+    return PHASES[this.phase];
+  }
+
+  // ───────────── Фазы ─────────────
+
+  /** Условие перехода в фазу 2. Единственное место в коде, которое его знает. */
+  private shouldEnterPhase2(): boolean {
+    return this.phase === 1 && this.score >= PHASE2_SCORE;
+  }
+
+  /**
+   * Вход в фазу 2. Новые скорость экрана и плотность фигур отдельно включать не нужно:
+   * код читает их через this.settings, а он теперь возвращает PHASES[2].
+   */
+  private enterPhase2(): void {
+    this.phase = 2;
+    this.phaseText.setText('ФАЗА 2').setColor(PHASE2_COLOR);
+    this.tweens.add({ targets: this.phaseTint, alpha: 1, duration: 600 });
+    this.showPhaseBanner();
+  }
+
+  /** Крупная надпись под плашкой: тает сама, на паузе замирает вместе с остальными анимациями. */
+  private showPhaseBanner(): void {
+    const y = HUD_HEIGHT + 110;
+    const banner = [
+      this.add.rectangle(GAME_WIDTH / 2, y, GAME_WIDTH, 170, 0x000000, 0.75).setScrollFactor(0),
+      this.addCenteredText(y - 22, 'ФАЗА 2', 72).setColor(PHASE2_COLOR),
+      this.addCenteredText(y + 46, 'Экран быстрее, фигур больше', 30),
+    ];
+    for (const part of banner) part.setDepth(DEPTH.banner);
+    this.tweens.add({
+      targets: banner,
+      alpha: 0,
+      delay: PHASE_BANNER_MS,
+      duration: 400,
+      onComplete: () => {
+        for (const part of banner) part.destroy();
+      },
+    });
   }
 
   // ───────────── Клетки ↔ пиксели ─────────────
@@ -204,10 +285,9 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Новый ряд: генерируем фигуры в логике и рисуем тёмные клетки и фигуры. */
+  /** Новый ряд: генерируем фигуры в логике (ряд сразу ложится на доску) и рисуем тёмные клетки и фигуры. */
   private createRow(row: number): void {
-    const cells = generateRow(row);
-    this.board.addRow(cells);
+    const cells = generateRow(this.board, this.path, this.settings);
 
     const views: Phaser.GameObjects.GameObject[] = [];
     for (let col = 0; col < COLS; col++) {
@@ -318,10 +398,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private moveKnight(to: Cell): void {
-    if (this.state === 'ready') {
-      this.state = 'playing'; // экран поедет после первого хода
-      for (const part of this.pauseButton) part.setVisible(true); // до первого хода ставить на паузу нечего
-    }
+    if (this.state === 'ready') this.state = 'playing'; // экран поедет после первого хода
 
     // 1. Взятие: прыгнул на фигуру — съел её
     const eaten = this.board.get(to.col, to.row);
@@ -395,7 +472,8 @@ export class GameScene extends Phaser.Scene {
 
   private scrollCamera(seconds: number): void {
     const camera = this.cameras.main;
-    const speed = Math.min(SCROLL_SPEED_MAX, SCROLL_SPEED_START + SCROLL_ACCEL * this.elapsed);
+    const baseSpeed = Math.min(SCROLL_SPEED_MAX, SCROLL_SPEED_START + SCROLL_ACCEL * this.elapsed);
+    const speed = baseSpeed * this.settings.scrollMultiplier;
     camera.scrollY -= speed * seconds; // мир растёт вверх → камера едет в минус
 
     // Конь ушёл высоко — подтягиваем экран, чтобы было видно, что впереди
@@ -415,7 +493,7 @@ export class GameScene extends Phaser.Scene {
 
     // До первого хода вместо счёта — подсказка
     this.scoreText = this.add
-      .text(24, HUD_HEIGHT / 2, 'Ходи конём вверх. Не подставляйся!', {
+      .text(24, HUD_HEIGHT / 2, 'Ходи вверх. Не подставляйся!', {
         fontFamily: UI_FONT,
         fontSize: '32px',
         fontStyle: 'bold',
@@ -424,6 +502,25 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0.5)
       .setScrollFactor(0)
       .setDepth(DEPTH.hud);
+
+    // Индикатор фазы — слева от кнопки паузы
+    this.phaseText = this.add
+      .text(GAME_WIDTH - HUD_HEIGHT - 20, HUD_HEIGHT / 2, 'Фаза 1', {
+        fontFamily: UI_FONT,
+        fontSize: '28px',
+        fontStyle: 'bold',
+        color: '#cbd5e1',
+      })
+      .setOrigin(1, 0.5)
+      .setScrollFactor(0)
+      .setDepth(DEPTH.hud);
+
+    // Оттенок доски для фазы 2: создаём сразу, но прозрачным
+    this.phaseTint = this.add
+      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, PHASE2_TINT, PHASE2_TINT_ALPHA)
+      .setScrollFactor(0)
+      .setDepth(DEPTH.tint)
+      .setAlpha(0);
 
     // Красная полоса внизу — край, который подгоняет коня
     this.add
@@ -445,34 +542,40 @@ export class GameScene extends Phaser.Scene {
     const rightBar = this.add.rectangle(x + 9, y, 10, 32, 0xffffff);
 
     this.pauseButton = [hitArea, leftBar, rightBar];
-    for (const part of this.pauseButton) {
-      // Невидимая кнопка не ловит тапы — до первого хода её как будто нет
-      part.setScrollFactor(0).setDepth(DEPTH.hud).setVisible(false);
-    }
+    for (const part of this.pauseButton) part.setScrollFactor(0).setDepth(DEPTH.hud);
   }
 
   // ───────────── Пауза ─────────────
 
-  /** Только во время игры: до первого хода и после проигрыша ставить на паузу нечего. */
+  /**
+   * Пауза — это состояние, а не надпись. Всё замирает само:
+   * update() двигает экран, считает игровое время и создаёт ряды только в 'playing',
+   * ходы в handleTap() на паузе не принимаются, а анимации стоят через tweens.pauseAll().
+   */
   private pauseGame(): void {
-    if (this.state !== 'playing') return;
-    this.state = 'paused'; // update() крутит экран только в 'playing' — значит, всё встало
+    if (this.state !== 'ready' && this.state !== 'playing') return; // после проигрыша пауза не нужна
+    this.stateBeforePause = this.state;
+    this.state = 'paused';
+    this.tweens.pauseAll(); // прыжок коня и другие анимации тоже замирают
 
     this.pauseViews = [
       this.add
         .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, PAUSE_COLOR)
         .setScrollFactor(0)
         .setDepth(DEPTH.ui),
-      this.addCenteredText(GAME_HEIGHT * 0.42, 'Пауза', 64),
+      this.addCenteredText(GAME_HEIGHT * 0.42, 'ПАУЗА', 72),
       this.addCenteredText(GAME_HEIGHT * 0.52, 'Тапни, чтобы продолжить', 34),
+      this.addCenteredText(GAME_HEIGHT * 0.57, 'или нажми P / Esc', 28),
     ];
   }
 
+  /** Игра продолжается ровно с того же места: ничего не пересоздаётся. */
   private resumeGame(): void {
     if (this.state !== 'paused') return;
     for (const view of this.pauseViews) view.destroy();
     this.pauseViews = [];
-    this.state = 'playing';
+    this.tweens.resumeAll();
+    this.state = this.stateBeforePause;
   }
 
   private togglePause(): void {
