@@ -2,7 +2,7 @@
  * Все настраиваемые параметры игры — в одном месте.
  * Если на проверке просят «поменять правило», почти всегда это одно число здесь.
  */
-import type { EnemyType } from './chess';
+import type { EnemyType } from "./chess";
 
 // ═════════════ РУЧКИ БАЛАНСА: сложность меняется здесь, а не по коду ═════════════
 
@@ -29,14 +29,14 @@ export const PHASES: Record<Phase, PhaseSettings> = {
     scrollMultiplier: 1,
   },
   2: {
-    enemyChance: 0.5,
+    enemyChance: 0.25,
     enemyWeights: { pawn: 35, knight: 16, bishop: 24, rook: 15, queen: 10 },
-    scrollMultiplier: 10,
+    scrollMultiplier: 5,
   },
 };
 
 /** Фаза 2 начинается, когда счёт достигает этого порога (по прогрессу игрока, а не по времени). */
-export const PHASE2_SCORE = 10;
+export const PHASE2_SCORE = 30;
 
 // ═════════════ Остальное ═════════════
 
@@ -92,4 +92,4 @@ export const CAPTURE_DELAY_MS = 250; // пауза перед ответом п�
 export const CAPTURE_MS_PER_CELL = 80; // скорость, с которой фигура едет рубить
 export const RESTART_DELAY_MS = 500; // защита от случайного рестарта быстрым тапом
 
-export const BEST_SCORE_KEY = 'knight-best-score';
+export const BEST_SCORE_KEY = "knight-best-score";
