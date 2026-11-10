@@ -31,7 +31,9 @@ export const PHASES: Record<Phase, PhaseSettings> = {
   2: {
     enemyChance: 0.25,
     enemyWeights: { pawn: 35, knight: 16, bishop: 24, rook: 15, queen: 10 },
-    scrollMultiplier: 5,
+    // Было 5: на тесте игроки гибли сразу после 30 очков — экран догонял за 2–4 секунды.
+    // При 2 экран заметно быстрее, но в фазе 2 можно продержаться 1–2 минуты.
+    scrollMultiplier: 2,
   },
 };
 
