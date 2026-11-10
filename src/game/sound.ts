@@ -9,6 +9,14 @@ class Sfx {
   private ctx: AudioContext | null = null;
   muted = readMuted();
 
+  constructor() {
+    // Сцена будит звук в начале касания, а iPhone разрешает его только в конце касания (touchend).
+    // Поэтому будим ещё и на отпускание пальца или мыши и на клавиши — как это делает сам Phaser.
+    for (const type of ['touchend', 'mouseup', 'keydown']) {
+      window.addEventListener(type, () => this.unlock(), { passive: true });
+    }
+  }
+
   /** Вызывать из обработчика тапа: только там браузер разрешает создать и запустить звук. */
   unlock(): void {
     if (!this.ctx) {
