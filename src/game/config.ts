@@ -21,6 +21,8 @@ export function createGame(parent: string): Phaser.Game {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
     },
+    // Звуки синтезирует sound.ts через Web Audio — встроенный звук Phaser не нужен
+    audio: { noAudio: true },
   };
 
   return new Phaser.Game(config);

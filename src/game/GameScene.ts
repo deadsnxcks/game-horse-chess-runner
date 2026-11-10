@@ -44,10 +44,13 @@ import {
   FONT,
   PIECE_ART,
   PIECE_TEXTURE_SIZE,
+  mixColor,
   pieceTexture,
   type PieceArt,
 } from './theme';
-import { createButton } from './ui';
+import { attackLine, burst, floatText, ring } from './effects';
+import { createButton, type Button } from './ui';
+import { sfx } from './sound';
 
 /** Сколько рядов держим созданными выше верхнего края экрана. */
 const ROWS_AHEAD = 3;
@@ -65,14 +68,18 @@ const KILLED_BY: Record<EnemyType, string> = {
 
 /** Сколько висит баннер «ФАЗА 2», прежде чем растаять. */
 const PHASE_BANNER_MS = 1600;
-/** Прозрачность красной полосы внизу. */
+/** Пауза между гибелью и экраном проигрыша — успеть увидеть, что случилось. */
+const DEATH_PAUSE_MS = 600;
+/** Ближе этого к красной полосе внизу полоса мигает — предупреждение. */
+const DANGER_ZONE = CELL * 1.5;
+/** Прозрачность красной полосы, пока конь далеко от неё. */
 const BAND_ALPHA = 0.72;
 
 /**
  * ready   — ждём первый ход, экран стоит;
  * playing — экран едет, можно ходить;
  * paused  — пауза: всё заморожено, доску не видно, тап / P / Esc = продолжить;
- * dying   — вражеская фигура едет рубить коня;
+ * dying   — коня рубят: анимация гибели;
  * over    — экран проигрыша, тап = заново.
  */
 type State = 'ready' | 'playing' | 'paused' | 'dying' | 'over';
@@ -113,10 +120,13 @@ export class GameScene extends Phaser.Scene {
   private scoreText!: Phaser.GameObjects.Text;
   private phaseChip!: Phaser.GameObjects.Rectangle;
   private phaseText!: Phaser.GameObjects.Text;
+  /** Красная полоса внизу — край, который подгоняет коня. */
+  private band!: Phaser.GameObjects.Rectangle;
   /** Кнопка паузы: [0] — круг, который ловит нажатие, остальное — две палочки значка. */
   private pauseButton: Phaser.GameObjects.Shape[] = [];
   /** Объекты экрана паузы — удаляем, когда игра продолжается. */
   private pauseViews: Phaser.GameObjects.GameObject[] = [];
+  private soundButton: Button | null = null;
   /** Подсказка первого хода — исчезает после первого хода. */
   private hintViews: Array<Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text> = [];
   private moveMarks: Phaser.GameObjects.Arc[] = [];
@@ -155,6 +165,7 @@ export class GameScene extends Phaser.Scene {
     this.elapsed = 0;
     this.moveMarks = [];
     this.pauseViews = [];
+    this.soundButton = null;
     this.hintViews = [];
     this.pieceViews = new Map();
     this.rowViews = new Map();
@@ -198,10 +209,9 @@ export class GameScene extends Phaser.Scene {
     this.scrollCamera(seconds);
     this.createRowsAhead();
     this.removeRowsBelow();
+    this.updateDangerBand();
 
-    if (this.knightScreenY() > GAME_HEIGHT - DEATH_BAND) {
-      this.gameOver('Экран догнал коня');
-    }
+    if (this.knightScreenY() > GAME_HEIGHT - DEATH_BAND) this.screenCaughtKnight();
   }
 
   /** Настройки текущей фазы: плотность и состав фигур, скорость экрана. Все — в constants.ts. */
@@ -219,21 +229,42 @@ export class GameScene extends Phaser.Scene {
   /**
    * Вход в фазу 2. Новые скорость экрана и плотность фигур отдельно включать не нужно:
    * код читает их через this.settings, а он теперь возвращает PHASES[2].
+   * Остальное — отклик, чтобы смену правил нельзя было не заметить:
+   * доска краснеет, вспышка, баннер, плашка фазы и звук.
    */
   private enterPhase2(): void {
     this.phase = 2;
-    this.paintBoard(2);
+    this.recolorBoard(1, 2);
     this.phaseChip.setFillStyle(COLOR.accent);
     this.phaseText.setText('ФАЗА 2').setColor(COLOR.onAccent);
+    this.tweens.add({
+      targets: [this.phaseChip, this.phaseText],
+      scale: 1.25,
+      duration: 160,
+      yoyo: true,
+      ease: 'Quad.easeOut',
+    });
+    this.cameras.main.flash(300, 255, 176, 32);
+    sfx.phase();
     this.showPhaseBanner();
   }
 
-  /** Красим доску в цвета фазы: светлые клетки — это фон камеры, тёмные — прямоугольники рядов. */
-  private paintBoard(phase: Phase): void {
-    const colors = BOARD[phase];
-    this.cameras.main.setBackgroundColor(colors.light);
-    for (const square of this.darkSquares()) square.setFillStyle(colors.dark);
-    this.knightSquare.setFillStyle(colors.knightSquare, 0.75);
+  /** Плавно перекрашиваем доску: светлые клетки — это фон камеры, тёмные — прямоугольники рядов. */
+  private recolorBoard(from: Phase, to: Phase): void {
+    const a = BOARD[from];
+    const b = BOARD[to];
+    this.tweens.addCounter({
+      from: 0,
+      to: 1,
+      duration: 700,
+      onUpdate: (tween) => {
+        const t = tween.getValue() ?? 1;
+        this.cameras.main.setBackgroundColor(mixColor(a.light, b.light, t));
+        const dark = mixColor(a.dark, b.dark, t);
+        for (const square of this.darkSquares()) square.setFillStyle(dark);
+        this.knightSquare.setFillStyle(mixColor(a.knightSquare, b.knightSquare, t), 0.75);
+      },
+    });
   }
 
   /**
@@ -251,7 +282,8 @@ export class GameScene extends Phaser.Scene {
       this.uiText(GAME_WIDTH / 2, y - 20, 'ФАЗА 2', 56, COLOR.accentCss),
       this.uiText(GAME_WIDTH / 2, y + 31, 'Экран быстрее, фигур больше', 26),
     ];
-    for (const part of banner) part.setDepth(DEPTH.banner);
+    for (const part of banner) part.setDepth(DEPTH.banner).setScale(0.6);
+    this.tweens.add({ targets: banner, scale: 1, duration: 260, ease: 'Back.easeOut' });
     this.tweens.add({
       targets: banner,
       alpha: 0,
@@ -429,18 +461,28 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  /** over — список интерактивных объектов под пальцем (у нас это только кнопка паузы). */
+  /** over — список интерактивных объектов под пальцем: кнопка паузы или кнопка звука. */
   private handleTap(pointer: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]): void {
+    sfx.unlock(); // браузер разрешает звук только после касания
     if (this.state === 'over') {
-      if (this.time.now >= this.restartAllowedAt) this.scene.restart();
+      if (this.time.now >= this.restartAllowedAt) {
+        sfx.click();
+        this.scene.restart();
+      }
       return;
     }
     if (this.state === 'dying') return;
     if (this.state === 'paused') {
-      this.resumeGame(); // на паузе любой тап — продолжить
+      if (this.soundButton && over.includes(this.soundButton.bg)) {
+        this.toggleSound();
+        return;
+      }
+      sfx.click();
+      this.resumeGame(); // на паузе любой другой тап — продолжить
       return;
     }
     if (over.includes(this.pauseButton[0])) {
+      sfx.click();
       this.pauseGame(); // тап по кнопке паузы — не ход
       return;
     }
@@ -457,6 +499,7 @@ export class GameScene extends Phaser.Scene {
       this.state = 'playing'; // экран поедет после первого хода
       this.hideFirstMoveHint();
     }
+    const scoreBefore = this.score;
 
     // 1. Взятие: прыгнул на фигуру — съел её
     const eaten = this.board.get(to.col, to.row);
@@ -472,7 +515,9 @@ export class GameScene extends Phaser.Scene {
       this.score += (to.row - this.maxRow) * POINTS_PER_ROW;
       this.maxRow = to.row;
     }
-    this.scoreText.setText(String(this.score));
+    this.showScoreGain(to, this.score - scoreBefore, eaten !== null);
+    if (eaten) sfx.capture();
+    else sfx.move();
 
     // 4. Ответ противника: если клетку коня бьёт видимая фигура — она рубит
     const attacker = findAttacker(this.board, to, this.bottomActiveRow(), this.topActiveRow());
@@ -483,37 +528,74 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Взятие: фигура исчезает с доски, очки — её шахматная ценность. */
+  /** Взятие: фигура исчезает с доски и разлетается на осколки, очки — её шахматная ценность. */
   private capturePiece(at: Cell, type: EnemyType): void {
     this.board.remove(at.col, at.row);
     this.score += PIECE_VALUE[type];
-    this.pieceViews.get(cellKey(at.col, at.row))?.destroy();
+    const view = this.pieceViews.get(cellKey(at.col, at.row));
     this.pieceViews.delete(cellKey(at.col, at.row));
+    if (!view) return;
+    burst(this, view, COLOR.pieceBits);
+    this.tweens.add({
+      targets: view,
+      scale: 0,
+      alpha: 0,
+      duration: 140,
+      onComplete: () => view.destroy(),
+    });
   }
 
-  /** Прыжок: конь летит в клетку. */
+  /** Прыжок: конь летит в клетку и в полёте чуть растёт, при приземлении — кольцо. */
   private animateJump(to: Cell): void {
     const target = this.cellCenter(to);
     this.tweens.killTweensOf([this.knight, this.knightSquare]);
+    this.knight.setScale(this.pieceScale);
     this.tweens.add({
       targets: [this.knight, this.knightSquare],
       x: target.x,
       y: target.y,
       duration: MOVE_MS,
       ease: 'Quad.easeOut',
+      onComplete: () => ring(this, target, COLOR.mark, 0.4),
+    });
+    this.tweens.add({
+      targets: this.knight,
+      scale: this.pieceScale * 1.2,
+      duration: MOVE_MS / 2,
+      yoyo: true,
+      ease: 'Quad.easeOut',
     });
   }
 
-  /** Фигура едет через доску и рубит коня — игрок видит, кого прозевал. */
+  /** Счёт: число в плашке подпрыгивает, над конём всплывает «+N» (за взятие — крупнее и жёлтым). */
+  private showScoreGain(at: Cell, gained: number, captured: boolean): void {
+    this.scoreText.setText(String(this.score));
+    if (gained <= 0) return;
+    const above = { x: this.cellX(at.col), y: this.cellY(at.row) - CELL * 0.45 };
+    floatText(
+      this,
+      above,
+      `+${gained}`,
+      captured ? COLOR.accentCss : COLOR.text,
+      captured ? 46 : 34,
+      this.renderScale,
+    );
+    this.tweens.killTweensOf(this.scoreText);
+    this.scoreText.setScale(1);
+    this.tweens.add({ targets: this.scoreText, scale: 1.25, duration: 90, yoyo: true });
+  }
+
+  /** Фигура едет через доску и рубит коня — красная линия показывает, откуда пришёл удар. */
   private knightCaptured(attacker: Attacker): void {
     this.state = 'dying';
     this.clearMoves();
     const knightAt = this.cellCenter({ col: this.knightCol, row: this.knightRow });
+    attackLine(this, this.cellCenter(attacker), knightAt, COLOR.danger, DEPTH.marks);
 
     const title = KILLED_BY[attacker.type];
     const view = this.pieceViews.get(cellKey(attacker.col, attacker.row));
     if (!view) {
-      this.gameOver(title);
+      this.knightDies(knightAt, title);
       return;
     }
 
@@ -529,11 +611,31 @@ export class GameScene extends Phaser.Scene {
       delay: MOVE_MS + CAPTURE_DELAY_MS,
       duration: distance * CAPTURE_MS_PER_CELL + 120,
       ease: 'Quad.easeIn',
-      onComplete: () => {
-        this.knight.setVisible(false);
-        this.cameras.main.shake(150, 0.01);
-        this.gameOver(title);
-      },
+      onComplete: () => this.knightDies(knightAt, title),
+    });
+  }
+
+  /** Экран догнал коня: та же гибель, только причина другая. */
+  private screenCaughtKnight(): void {
+    this.clearMoves();
+    this.band.setAlpha(1);
+    this.knightDies({ x: this.knight.x, y: this.knight.y }, 'Экран догнал коня');
+  }
+
+  /** Гибель коня: осколки, тряска, красная вспышка, звук — и через мгновение экран проигрыша. */
+  private knightDies(at: Point, title: string): void {
+    this.state = 'dying';
+    this.knight.setVisible(false);
+    burst(this, at, COLOR.knightBits, 16);
+    this.cameras.main.shake(180, 0.012);
+    this.cameras.main.flash(220, 239, 68, 68);
+    sfx.death();
+    // Пауза перед экраном проигрыша — через tween, чтобы она шла по тем же часам, что и анимации
+    this.tweens.addCounter({
+      from: 0,
+      to: 1,
+      duration: DEATH_PAUSE_MS,
+      onComplete: () => this.gameOver(title),
     });
   }
 
@@ -550,6 +652,12 @@ export class GameScene extends Phaser.Scene {
       const target = this.cellY(this.knightRow) - FOLLOW_LINE;
       camera.scrollY += (target - camera.scrollY) * Math.min(1, seconds * FOLLOW_SMOOTHING);
     }
+  }
+
+  /** Конь близко к нижнему краю — полоса мигает: предупреждение до того, как экран догонит. */
+  private updateDangerBand(): void {
+    const close = this.knightScreenY() > GAME_HEIGHT - DEATH_BAND - DANGER_ZONE;
+    this.band.setAlpha(close ? BAND_ALPHA + (1 - BAND_ALPHA) * Math.sin(this.elapsed * 14) : BAND_ALPHA);
   }
 
   // ───────────── Интерфейс ─────────────
@@ -596,8 +704,7 @@ export class GameScene extends Phaser.Scene {
       .setDepth(DEPTH.hud);
     this.phaseText = this.uiText(chipX, HUD_HEIGHT / 2, 'ФАЗА 1', 24, '#cbd5e1').setDepth(DEPTH.hud);
 
-    // Красная полоса внизу — край, который подгоняет коня
-    this.add
+    this.band = this.add
       .rectangle(GAME_WIDTH / 2, GAME_HEIGHT - DEATH_BAND / 2, GAME_WIDTH, DEATH_BAND, COLOR.danger)
       .setAlpha(BAND_ALPHA)
       .setScrollFactor(0)
@@ -633,6 +740,7 @@ export class GameScene extends Phaser.Scene {
 
     // Экран паузы непрозрачный: иначе паузой можно бесплатно думать над доской, пока экран стоит
     const resume = createButton(this, GAME_WIDTH / 2, 700, 440, 'Продолжить', 'primary', DEPTH.ui, this.renderScale);
+    this.soundButton = createButton(this, GAME_WIDTH / 2, 820, 440, this.soundLabel(), 'secondary', DEPTH.ui, this.renderScale);
     this.pauseViews = [
       this.add
         .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, COLOR.panel)
@@ -642,7 +750,9 @@ export class GameScene extends Phaser.Scene {
       this.uiText(GAME_WIDTH / 2, 572, 'Доска скрыта, пока игра стоит', 26, COLOR.textMuted),
       resume.bg,
       resume.label,
-      this.uiText(GAME_WIDTH / 2, 820, 'P или Esc — пауза с клавиатуры', 22, COLOR.textMuted),
+      this.soundButton.bg,
+      this.soundButton.label,
+      this.uiText(GAME_WIDTH / 2, 920, 'P или Esc — пауза с клавиатуры', 22, COLOR.textMuted),
     ];
   }
 
@@ -651,6 +761,7 @@ export class GameScene extends Phaser.Scene {
     if (this.state !== 'paused') return;
     for (const view of this.pauseViews) view.destroy();
     this.pauseViews = [];
+    this.soundButton = null;
     this.tweens.resumeAll();
     this.state = this.stateBeforePause;
   }
@@ -658,6 +769,16 @@ export class GameScene extends Phaser.Scene {
   private togglePause(): void {
     if (this.state === 'paused') this.resumeGame();
     else this.pauseGame();
+  }
+
+  private soundLabel(): string {
+    return sfx.muted ? 'Звук: выкл' : 'Звук: вкл';
+  }
+
+  private toggleSound(): void {
+    sfx.toggleMute();
+    this.soundButton?.label.setText(this.soundLabel());
+    sfx.click();
   }
 
   // ───────────── Конец игры ─────────────
