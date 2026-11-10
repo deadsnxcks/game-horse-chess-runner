@@ -42,15 +42,13 @@ export const PHASE2_SCORE = 30;
 
 // ═════════════ Остальное ═════════════
 
-// ── Холст: вертикальный 9:16 под телефон ──
+// ── Мир игры: вертикальный 9:16 под телефон (цвета и шрифты — в theme.ts) ──
 export const GAME_WIDTH = 720;
 export const GAME_HEIGHT = 1280;
 
 // ── Доска ──
 export const COLS = 6; // ширина доски в клетках
 export const CELL = GAME_WIDTH / COLS; // размер клетки в пикселях (120)
-export const LIGHT = 0xf0d9b5; // светлая клетка
-export const DARK = 0xb58863; // тёмная клетка
 export const PIECE_SIZE = 0.85; // размер фигуры относительно клетки
 
 // ── Старт ──

@@ -5,14 +5,12 @@ import {
   CAPTURE_MS_PER_CELL,
   CELL,
   COLS,
-  DARK,
   DEATH_BAND,
   FOLLOW_LINE,
   FOLLOW_SMOOTHING,
   GAME_HEIGHT,
   GAME_WIDTH,
   HUD_HEIGHT,
-  LIGHT,
   MOVE_MS,
   PHASE2_SCORE,
   PHASES,
@@ -39,35 +37,24 @@ import {
   type Cell,
   type EnemyType,
 } from './chess';
+import {
+  BOARD,
+  COLOR,
+  DEPTH,
+  FONT,
+  PIECE_ART,
+  PIECE_TEXTURE_SIZE,
+  pieceTexture,
+  type PieceArt,
+} from './theme';
+import { createButton } from './ui';
 
 /** Сколько рядов держим созданными выше верхнего края экрана. */
 const ROWS_AHEAD = 3;
 /** Сколько рядов под экраном ещё не удаляем. */
 const ROWS_BEHIND = 2;
 
-/** Слои отрисовки: что поверх чего. */
-const DEPTH = {
-  board: 0,
-  tint: 0.5, // красноватый оттенок доски в фазе 2 — над клетками, под фигурами
-  knightSquare: 1,
-  pieces: 2,
-  marks: 3,
-  knight: 4,
-  band: 8,
-  hud: 9,
-  banner: 9.5, // надпись «ФАЗА 2» — под экраном паузы и проигрыша
-  ui: 10,
-};
-
-const GLYPH: Record<EnemyType, string> = {
-  pawn: '♟',
-  knight: '♞',
-  bishop: '♝',
-  rook: '♜',
-  queen: '♛',
-};
-
-/** Подпись на экране проигрыша — кто срубил коня. */
+/** Заголовок экрана проигрыша — кто срубил коня. */
 const KILLED_BY: Record<EnemyType, string> = {
   pawn: 'Коня срубила пешка',
   knight: 'Коня срубил конь',
@@ -76,25 +63,10 @@ const KILLED_BY: Record<EnemyType, string> = {
   queen: 'Коня срубил ферзь',
 };
 
-/** Шрифты, в которых точно есть шахматные символы: Windows, Mac/iPhone, Android, Linux. */
-const PIECE_FONT = '"Segoe UI Symbol", "Apple Symbols", "Noto Sans Symbols 2", "DejaVu Sans", serif';
-/** Просит рисовать символ как текст: иначе ♟ на телефоне может стать цветным эмодзи. */
-const AS_TEXT = '︎';
-const UI_FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-const MARK_COLOR = 0x000000;
-const MARK_ALPHA = 0.25;
-const KNIGHT_SQUARE_COLOR = 0xcdd26a;
-const BAND_COLOR = 0xd63b3b;
-/** Экран паузы непрозрачный: иначе паузой можно бесплатно думать над доской, пока экран стоит. */
-const PAUSE_COLOR = 0x111827;
-/** Цвет фазы 2 в плашке и на баннере. */
-const PHASE2_COLOR = '#ffb020';
-/** Красноватый оттенок доски в фазе 2: сразу видно, что правила стали жёстче. */
-const PHASE2_TINT = 0xd63b3b;
-const PHASE2_TINT_ALPHA = 0.16;
 /** Сколько висит баннер «ФАЗА 2», прежде чем растаять. */
 const PHASE_BANNER_MS = 1600;
+/** Прозрачность красной полосы внизу. */
+const BAND_ALPHA = 0.72;
 
 /**
  * ready   — ждём первый ход, экран стоит;
@@ -106,6 +78,11 @@ const PHASE_BANNER_MS = 1600;
 type State = 'ready' | 'playing' | 'paused' | 'dying' | 'over';
 /** Из каких состояний можно встать на паузу — и в какое потом вернуться. */
 type PausableState = 'ready' | 'playing';
+
+interface Point {
+  x: number;
+  y: number;
+}
 
 const cellKey = (col: number, row: number) => `${col},${row}`;
 
@@ -126,24 +103,42 @@ export class GameScene extends Phaser.Scene {
   /** Время браузера (this.time.now), после которого тап на экране проигрыша перезапускает игру. */
   private restartAllowedAt = 0;
 
-  // Картинка (в пикселях)
-  private knight!: Phaser.GameObjects.Text;
+  // Картинка (в пикселях мира 720×1280)
+  /** Во сколько раз холст больше мира: камера приближена на столько же (см. config.ts). */
+  private renderScale = 1;
+  /** Масштаб картинки фигуры, при котором она занимает PIECE_SIZE клетки. */
+  private pieceScale = 1;
+  private knight!: Phaser.GameObjects.Image;
   private knightSquare!: Phaser.GameObjects.Rectangle;
   private scoreText!: Phaser.GameObjects.Text;
+  private phaseChip!: Phaser.GameObjects.Rectangle;
   private phaseText!: Phaser.GameObjects.Text;
-  private phaseTint!: Phaser.GameObjects.Rectangle;
-  /** Кнопка паузы: [0] — область нажатия, остальное — две палочки значка. */
-  private pauseButton: Phaser.GameObjects.Rectangle[] = [];
+  /** Кнопка паузы: [0] — круг, который ловит нажатие, остальное — две палочки значка. */
+  private pauseButton: Phaser.GameObjects.Shape[] = [];
   /** Объекты экрана паузы — удаляем, когда игра продолжается. */
   private pauseViews: Phaser.GameObjects.GameObject[] = [];
+  /** Подсказка первого хода — исчезает после первого хода. */
+  private hintViews: Array<Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text> = [];
   private moveMarks: Phaser.GameObjects.Arc[] = [];
   /** Картинки фигур по клетке — чтобы убрать съеденную или повести атакующую. */
-  private pieceViews = new Map<string, Phaser.GameObjects.Text>();
+  private pieceViews = new Map<string, Phaser.GameObjects.Image>();
   /** Все объекты каждого ряда — чтобы удалять ряды, уехавшие под экран. */
   private rowViews = new Map<number, Phaser.GameObjects.GameObject[]>();
 
   constructor() {
     super('GameScene');
+  }
+
+  /** Картинки фигур — SVG из public/pieces. При перезапуске сцены второй раз не грузим. */
+  preload(): void {
+    for (const art of PIECE_ART) {
+      const key = pieceTexture(art);
+      if (this.textures.exists(key)) continue;
+      this.load.svg(key, `pieces/${art}.svg`, {
+        width: PIECE_TEXTURE_SIZE,
+        height: PIECE_TEXTURE_SIZE,
+      });
+    }
   }
 
   create(): void {
@@ -160,15 +155,25 @@ export class GameScene extends Phaser.Scene {
     this.elapsed = 0;
     this.moveMarks = [];
     this.pauseViews = [];
+    this.hintViews = [];
     this.pieceViews = new Map();
     this.rowViews = new Map();
 
-    this.cameras.main.setBackgroundColor(LIGHT).setScroll(0, 0);
+    this.renderScale = this.scale.width / GAME_WIDTH;
+    this.pieceScale = (CELL * PIECE_SIZE) / PIECE_TEXTURE_SIZE;
+    // Камера приближена во столько же раз, во сколько холст больше мира:
+    // все координаты игры остаются в мире 720×1280, а картинка — чёткой
+    this.cameras.main
+      .setOrigin(0, 0)
+      .setZoom(this.renderScale)
+      .setBackgroundColor(BOARD[1].light)
+      .setScroll(0, 0);
 
     this.createRowsAhead();
     this.createKnight();
     this.createHud();
     this.showMoves();
+    this.showFirstMoveHint();
 
     this.input.on('pointerdown', this.handleTap, this);
     // Пауза с клавиатуры на компьютере: P или Esc переключают игра ⇄ пауза
@@ -217,18 +222,34 @@ export class GameScene extends Phaser.Scene {
    */
   private enterPhase2(): void {
     this.phase = 2;
-    this.phaseText.setText('ФАЗА 2').setColor(PHASE2_COLOR);
-    this.tweens.add({ targets: this.phaseTint, alpha: 1, duration: 600 });
+    this.paintBoard(2);
+    this.phaseChip.setFillStyle(COLOR.accent);
+    this.phaseText.setText('ФАЗА 2').setColor(COLOR.onAccent);
     this.showPhaseBanner();
   }
 
-  /** Крупная надпись под плашкой: тает сама, на паузе замирает вместе с остальными анимациями. */
+  /** Красим доску в цвета фазы: светлые клетки — это фон камеры, тёмные — прямоугольники рядов. */
+  private paintBoard(phase: Phase): void {
+    const colors = BOARD[phase];
+    this.cameras.main.setBackgroundColor(colors.light);
+    for (const square of this.darkSquares()) square.setFillStyle(colors.dark);
+    this.knightSquare.setFillStyle(colors.knightSquare, 0.75);
+  }
+
+  /**
+   * Надпись прямо под плашкой — поверх ряда-предпросмотра, где фигуры ещё не бьют,
+   * поэтому она не прячет опасность. Тает сама, на паузе замирает вместе с остальными анимациями.
+   */
   private showPhaseBanner(): void {
-    const y = HUD_HEIGHT + 110;
+    const y = HUD_HEIGHT + 66;
     const banner = [
-      this.add.rectangle(GAME_WIDTH / 2, y, GAME_WIDTH, 170, 0x000000, 0.75).setScrollFactor(0),
-      this.addCenteredText(y - 22, 'ФАЗА 2', 72).setColor(PHASE2_COLOR),
-      this.addCenteredText(y + 46, 'Экран быстрее, фигур больше', 30),
+      this.add
+        .rectangle(GAME_WIDTH / 2, y, 620, 116, COLOR.panel, 0.92)
+        .setRounded(28)
+        .setStrokeStyle(4, COLOR.accent)
+        .setScrollFactor(0),
+      this.uiText(GAME_WIDTH / 2, y - 20, 'ФАЗА 2', 56, COLOR.accentCss),
+      this.uiText(GAME_WIDTH / 2, y + 31, 'Экран быстрее, фигур больше', 26),
     ];
     for (const part of banner) part.setDepth(DEPTH.banner);
     this.tweens.add({
@@ -252,6 +273,10 @@ export class GameScene extends Phaser.Scene {
   /** Центр клетки по Y. Ряды растут вверх, а y в Phaser — вниз, отсюда минус. */
   private cellY(row: number): number {
     return GAME_HEIGHT - row * CELL - CELL / 2;
+  }
+
+  private cellCenter(cell: Cell): Point {
+    return { x: this.cellX(cell.col), y: this.cellY(cell.row) };
   }
 
   /** Где конь на экране (а не в мире): учитываем сдвиг камеры. */
@@ -295,19 +320,31 @@ export class GameScene extends Phaser.Scene {
       if ((col + row) % 2 === 1) {
         views.push(
           this.add
-            .rectangle(this.cellX(col), this.cellY(row), CELL, CELL, DARK)
-            .setDepth(DEPTH.board),
+            .rectangle(this.cellX(col), this.cellY(row), CELL, CELL, BOARD[this.phase].dark)
+            .setDepth(DEPTH.board)
+            .setName('square'),
         );
       }
 
       const type = cells[col];
       if (type) {
-        const piece = this.createPieceText(GLYPH[type], col, row, false);
+        const piece = this.createPiece(type, col, row);
         this.pieceViews.set(cellKey(col, row), piece);
         views.push(piece);
       }
     }
     this.rowViews.set(row, views);
+  }
+
+  /** Тёмные клетки всех нарисованных рядов — их перекрашиваем при смене фазы. */
+  private darkSquares(): Phaser.GameObjects.Rectangle[] {
+    const squares: Phaser.GameObjects.Rectangle[] = [];
+    for (const views of this.rowViews.values()) {
+      for (const view of views) {
+        if (view.name === 'square') squares.push(view as Phaser.GameObjects.Rectangle);
+      }
+    }
+    return squares;
   }
 
   /** Удаляем картинки рядов, уехавших под экран. Логика доски при этом остаётся. */
@@ -321,34 +358,29 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private createPieceText(
-    glyph: string,
-    col: number,
-    row: number,
-    isPlayer: boolean,
-  ): Phaser.GameObjects.Text {
+  /** Фигура — картинка из public/pieces, ужатая до PIECE_SIZE клетки. */
+  private createPiece(art: PieceArt, col: number, row: number): Phaser.GameObjects.Image {
     return this.add
-      .text(this.cellX(col), this.cellY(row), glyph + AS_TEXT, {
-        fontFamily: PIECE_FONT,
-        fontSize: `${Math.round(CELL * PIECE_SIZE)}px`,
-        color: isPlayer ? '#ffffff' : '#1c1c1c',
-        stroke: isPlayer ? '#1c1c1c' : '#ffffff',
-        strokeThickness: isPlayer ? 7 : 3,
-      })
-      .setOrigin(0.5)
-      .setDepth(isPlayer ? DEPTH.knight : DEPTH.pieces);
+      .image(this.cellX(col), this.cellY(row), pieceTexture(art))
+      .setScale(this.pieceScale)
+      .setDepth(art === 'player' ? DEPTH.knight : DEPTH.pieces);
   }
 
   // ───────────── Конь и ходы ─────────────
 
   private createKnight(): void {
-    const x = this.cellX(this.knightCol);
-    const y = this.cellY(this.knightRow);
     // Подсветка клетки коня — как подсветка хода на lichess: «вот ты»
     this.knightSquare = this.add
-      .rectangle(x, y, CELL, CELL, KNIGHT_SQUARE_COLOR, 0.75)
+      .rectangle(
+        this.cellX(this.knightCol),
+        this.cellY(this.knightRow),
+        CELL,
+        CELL,
+        BOARD[1].knightSquare,
+        0.75,
+      )
       .setDepth(DEPTH.knightSquare);
-    this.knight = this.createPieceText('♞', this.knightCol, this.knightRow, true);
+    this.knight = this.createPiece('player', this.knightCol, this.knightRow);
   }
 
   private legalMoves(): Cell[] {
@@ -359,12 +391,11 @@ export class GameScene extends Phaser.Scene {
   private showMoves(): void {
     this.clearMoves();
     for (const move of this.legalMoves()) {
-      const x = this.cellX(move.col);
-      const y = this.cellY(move.row);
+      const { x, y } = this.cellCenter(move);
       const mark =
         this.board.get(move.col, move.row) !== null
-          ? this.add.circle(x, y, CELL * 0.44).setStrokeStyle(8, MARK_COLOR, MARK_ALPHA)
-          : this.add.circle(x, y, CELL * 0.14, MARK_COLOR, MARK_ALPHA);
+          ? this.add.circle(x, y, CELL * 0.44).setStrokeStyle(8, COLOR.mark, 0.25)
+          : this.add.circle(x, y, CELL * 0.14, COLOR.mark, 0.25);
       this.moveMarks.push(mark.setDepth(DEPTH.marks));
     }
   }
@@ -372,6 +403,30 @@ export class GameScene extends Phaser.Scene {
   private clearMoves(): void {
     for (const mark of this.moveMarks) mark.destroy();
     this.moveMarks = [];
+  }
+
+  /** Первые секунды: подсказка прямо над ходами коня (ряд 4 всегда пустой). */
+  private showFirstMoveHint(): void {
+    const y = this.cellY(START_ROW + 3);
+    this.hintViews = [
+      this.add.rectangle(GAME_WIDTH / 2, y, 620, 116, COLOR.panel, 0.88).setRounded(28),
+      this.uiText(GAME_WIDTH / 2, y - 20, 'Тапни на точку — конь прыгнет', 32),
+      this.uiText(GAME_WIDTH / 2, y + 26, 'Забирайся выше и не вставай под удар', 24, COLOR.textMuted),
+    ];
+    for (const view of this.hintViews) view.setScrollFactor(1).setDepth(DEPTH.effects);
+  }
+
+  private hideFirstMoveHint(): void {
+    const views = this.hintViews;
+    this.hintViews = [];
+    this.tweens.add({
+      targets: views,
+      alpha: 0,
+      duration: 250,
+      onComplete: () => {
+        for (const view of views) view.destroy();
+      },
+    });
   }
 
   /** over — список интерактивных объектов под пальцем (у нас это только кнопка паузы). */
@@ -398,35 +453,26 @@ export class GameScene extends Phaser.Scene {
   }
 
   private moveKnight(to: Cell): void {
-    if (this.state === 'ready') this.state = 'playing'; // экран поедет после первого хода
+    if (this.state === 'ready') {
+      this.state = 'playing'; // экран поедет после первого хода
+      this.hideFirstMoveHint();
+    }
 
     // 1. Взятие: прыгнул на фигуру — съел её
     const eaten = this.board.get(to.col, to.row);
-    if (eaten) {
-      this.board.remove(to.col, to.row);
-      this.pieceViews.get(cellKey(to.col, to.row))?.destroy();
-      this.pieceViews.delete(cellKey(to.col, to.row));
-      this.score += PIECE_VALUE[eaten];
-    }
+    if (eaten) this.capturePiece(to, eaten);
 
     // 2. Логику меняем сразу, картинку — короткой анимацией
     this.knightCol = to.col;
     this.knightRow = to.row;
-    this.tweens.killTweensOf([this.knight, this.knightSquare]);
-    this.tweens.add({
-      targets: [this.knight, this.knightSquare],
-      x: this.cellX(to.col),
-      y: this.cellY(to.row),
-      duration: MOVE_MS,
-      ease: 'Quad.easeOut',
-    });
+    this.animateJump(to);
 
     // 3. Очки за высоту — только за ряды, где конь ещё не был
     if (to.row > this.maxRow) {
       this.score += (to.row - this.maxRow) * POINTS_PER_ROW;
       this.maxRow = to.row;
     }
-    this.scoreText.setText(`Счёт: ${this.score}`);
+    this.scoreText.setText(String(this.score));
 
     // 4. Ответ противника: если клетку коня бьёт видимая фигура — она рубит
     const attacker = findAttacker(this.board, to, this.bottomActiveRow(), this.topActiveRow());
@@ -437,14 +483,37 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Взятие: фигура исчезает с доски, очки — её шахматная ценность. */
+  private capturePiece(at: Cell, type: EnemyType): void {
+    this.board.remove(at.col, at.row);
+    this.score += PIECE_VALUE[type];
+    this.pieceViews.get(cellKey(at.col, at.row))?.destroy();
+    this.pieceViews.delete(cellKey(at.col, at.row));
+  }
+
+  /** Прыжок: конь летит в клетку. */
+  private animateJump(to: Cell): void {
+    const target = this.cellCenter(to);
+    this.tweens.killTweensOf([this.knight, this.knightSquare]);
+    this.tweens.add({
+      targets: [this.knight, this.knightSquare],
+      x: target.x,
+      y: target.y,
+      duration: MOVE_MS,
+      ease: 'Quad.easeOut',
+    });
+  }
+
   /** Фигура едет через доску и рубит коня — игрок видит, кого прозевал. */
   private knightCaptured(attacker: Attacker): void {
     this.state = 'dying';
     this.clearMoves();
+    const knightAt = this.cellCenter({ col: this.knightCol, row: this.knightRow });
 
+    const title = KILLED_BY[attacker.type];
     const view = this.pieceViews.get(cellKey(attacker.col, attacker.row));
     if (!view) {
-      this.gameOver(KILLED_BY[attacker.type]);
+      this.gameOver(title);
       return;
     }
 
@@ -455,15 +524,15 @@ export class GameScene extends Phaser.Scene {
     view.setDepth(DEPTH.knight + 1);
     this.tweens.add({
       targets: view,
-      x: this.cellX(this.knightCol),
-      y: this.cellY(this.knightRow),
+      x: knightAt.x,
+      y: knightAt.y,
       delay: MOVE_MS + CAPTURE_DELAY_MS,
       duration: distance * CAPTURE_MS_PER_CELL + 120,
       ease: 'Quad.easeIn',
       onComplete: () => {
         this.knight.setVisible(false);
         this.cameras.main.shake(150, 0.01);
-        this.gameOver(KILLED_BY[attacker.type]);
+        this.gameOver(title);
       },
     });
   }
@@ -485,61 +554,65 @@ export class GameScene extends Phaser.Scene {
 
   // ───────────── Интерфейс ─────────────
 
+  /** Текст интерфейса: один шрифт, жирный, по центру, чёткий на любом экране. */
+  private uiText(
+    x: number,
+    y: number,
+    text: string,
+    size: number,
+    color: string = COLOR.text,
+  ): Phaser.GameObjects.Text {
+    return this.add
+      .text(x, y, text, {
+        fontFamily: FONT,
+        fontSize: `${size}px`,
+        fontStyle: 'bold',
+        color,
+        align: 'center',
+        resolution: this.renderScale,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(DEPTH.ui);
+  }
+
+  /**
+   * Плашка сверху: счёт слева, фаза и пауза справа. Плашка непрозрачная — фигуры под ней
+   * не бьют и не мешают читать счёт. Полоса опасности внизу.
+   */
   private createHud(): void {
     this.add
-      .rectangle(GAME_WIDTH / 2, HUD_HEIGHT / 2, GAME_WIDTH, HUD_HEIGHT, 0x000000, 0.45)
+      .rectangle(GAME_WIDTH / 2, HUD_HEIGHT / 2, GAME_WIDTH, HUD_HEIGHT, COLOR.panel)
       .setScrollFactor(0)
       .setDepth(DEPTH.hud);
 
-    // До первого хода вместо счёта — подсказка
-    this.scoreText = this.add
-      .text(24, HUD_HEIGHT / 2, 'Ходи вверх. Не подставляйся!', {
-        fontFamily: UI_FONT,
-        fontSize: '32px',
-        fontStyle: 'bold',
-        color: '#ffffff',
-      })
-      .setOrigin(0, 0.5)
+    this.scoreText = this.uiText(28, HUD_HEIGHT / 2, '0', 42).setOrigin(0, 0.5).setDepth(DEPTH.hud);
+
+    const chipX = GAME_WIDTH - HUD_HEIGHT - 96;
+    this.phaseChip = this.add
+      .rectangle(chipX, HUD_HEIGHT / 2, 160, 44, COLOR.chip)
+      .setRounded(22)
       .setScrollFactor(0)
       .setDepth(DEPTH.hud);
-
-    // Индикатор фазы — слева от кнопки паузы
-    this.phaseText = this.add
-      .text(GAME_WIDTH - HUD_HEIGHT - 20, HUD_HEIGHT / 2, 'Фаза 1', {
-        fontFamily: UI_FONT,
-        fontSize: '28px',
-        fontStyle: 'bold',
-        color: '#cbd5e1',
-      })
-      .setOrigin(1, 0.5)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.hud);
-
-    // Оттенок доски для фазы 2: создаём сразу, но прозрачным
-    this.phaseTint = this.add
-      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, PHASE2_TINT, PHASE2_TINT_ALPHA)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.tint)
-      .setAlpha(0);
+    this.phaseText = this.uiText(chipX, HUD_HEIGHT / 2, 'ФАЗА 1', 24, '#cbd5e1').setDepth(DEPTH.hud);
 
     // Красная полоса внизу — край, который подгоняет коня
     this.add
-      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT - DEATH_BAND / 2, GAME_WIDTH, DEATH_BAND, BAND_COLOR, 0.55)
+      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT - DEATH_BAND / 2, GAME_WIDTH, DEATH_BAND, COLOR.danger)
+      .setAlpha(BAND_ALPHA)
       .setScrollFactor(0)
       .setDepth(DEPTH.band);
 
     this.createPauseButton();
   }
 
-  /** Кнопка паузы в правом углу плашки: квадрат под палец и значок из двух палочек. */
+  /** Кнопка паузы в правом углу плашки: круг под палец и значок из двух палочек. */
   private createPauseButton(): void {
-    const x = GAME_WIDTH - HUD_HEIGHT / 2;
+    const x = GAME_WIDTH - 40;
     const y = HUD_HEIGHT / 2;
-    const hitArea = this.add
-      .rectangle(x, y, HUD_HEIGHT, HUD_HEIGHT, 0xffffff, 0.15)
-      .setInteractive({ useHandCursor: true });
-    const leftBar = this.add.rectangle(x - 9, y, 10, 32, 0xffffff);
-    const rightBar = this.add.rectangle(x + 9, y, 10, 32, 0xffffff);
+    const hitArea = this.add.circle(x, y, 28, 0xffffff, 0.14).setInteractive({ useHandCursor: true });
+    const leftBar = this.add.rectangle(x - 7, y, 8, 24, 0xffffff).setRounded(3);
+    const rightBar = this.add.rectangle(x + 7, y, 8, 24, 0xffffff).setRounded(3);
 
     this.pauseButton = [hitArea, leftBar, rightBar];
     for (const part of this.pauseButton) part.setScrollFactor(0).setDepth(DEPTH.hud);
@@ -558,14 +631,18 @@ export class GameScene extends Phaser.Scene {
     this.state = 'paused';
     this.tweens.pauseAll(); // прыжок коня и другие анимации тоже замирают
 
+    // Экран паузы непрозрачный: иначе паузой можно бесплатно думать над доской, пока экран стоит
+    const resume = createButton(this, GAME_WIDTH / 2, 700, 440, 'Продолжить', 'primary', DEPTH.ui, this.renderScale);
     this.pauseViews = [
       this.add
-        .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, PAUSE_COLOR)
+        .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, COLOR.panel)
         .setScrollFactor(0)
-        .setDepth(DEPTH.ui),
-      this.addCenteredText(GAME_HEIGHT * 0.42, 'ПАУЗА', 72),
-      this.addCenteredText(GAME_HEIGHT * 0.52, 'Тапни, чтобы продолжить', 34),
-      this.addCenteredText(GAME_HEIGHT * 0.57, 'или нажми P / Esc', 28),
+        .setDepth(DEPTH.ui - 0.01),
+      this.uiText(GAME_WIDTH / 2, 500, 'ПАУЗА', 80),
+      this.uiText(GAME_WIDTH / 2, 572, 'Доска скрыта, пока игра стоит', 26, COLOR.textMuted),
+      resume.bg,
+      resume.label,
+      this.uiText(GAME_WIDTH / 2, 820, 'P или Esc — пауза с клавиатуры', 22, COLOR.textMuted),
     ];
   }
 
@@ -583,6 +660,8 @@ export class GameScene extends Phaser.Scene {
     else this.pauseGame();
   }
 
+  // ───────────── Конец игры ─────────────
+
   private gameOver(reason: string): void {
     this.state = 'over';
     this.clearMoves();
@@ -591,27 +670,13 @@ export class GameScene extends Phaser.Scene {
     const best = this.saveBestScore();
 
     this.add
-      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.72)
+      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, COLOR.panel, 0.85)
       .setScrollFactor(0)
-      .setDepth(DEPTH.ui);
-    this.addCenteredText(GAME_HEIGHT * 0.36, reason, 52);
-    this.addCenteredText(GAME_HEIGHT * 0.46, `Счёт: ${this.score}`, 46);
-    this.addCenteredText(GAME_HEIGHT * 0.52, `Рекорд: ${best}`, 34);
-    this.addCenteredText(GAME_HEIGHT * 0.64, 'Тапни, чтобы начать заново', 34);
-  }
-
-  private addCenteredText(y: number, text: string, size: number): Phaser.GameObjects.Text {
-    return this.add
-      .text(GAME_WIDTH / 2, y, text, {
-        fontFamily: UI_FONT,
-        fontSize: `${size}px`,
-        fontStyle: 'bold',
-        color: '#ffffff',
-        align: 'center',
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(DEPTH.ui);
+      .setDepth(DEPTH.ui - 0.01);
+    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.36, reason, 52);
+    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.46, `Счёт: ${this.score}`, 46);
+    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.52, `Рекорд: ${best}`, 34, COLOR.textMuted);
+    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.64, 'Тапни, чтобы начать заново', 34);
   }
 
   /** Рекорд хранится в браузере игрока. localStorage бывает недоступен — тогда просто без рекорда. */
