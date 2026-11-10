@@ -49,7 +49,7 @@ import {
   type PieceArt,
 } from './theme';
 import { attackLine, burst, floatText, ring } from './effects';
-import { createButton, type Button } from './ui';
+import { createButton, createPanel, type Button } from './ui';
 import { sfx } from './sound';
 
 /** Сколько рядов держим созданными выше верхнего края экрана. */
@@ -66,6 +66,17 @@ const KILLED_BY: Record<EnemyType, string> = {
   queen: 'Коня срубил ферзь',
 };
 
+/** Правило фигуры — на экране проигрыша, чтобы было понятно, почему клетка была под ударом. */
+const RULE: Record<EnemyType, string> = {
+  pawn: 'Чёрная пешка бьёт по диагонали вниз',
+  knight: 'Конь бьёт буквой «Г» — как и ты',
+  bishop: 'Слон бьёт по диагоналям',
+  rook: 'Ладья бьёт по прямым',
+  queen: 'Ферзь бьёт по прямым и диагоналям',
+};
+
+const SCREEN_DEATH = { title: 'Экран догнал коня', rule: 'Экран едет вверх — не стой на месте' };
+
 /** Сколько висит баннер «ФАЗА 2», прежде чем растаять. */
 const PHASE_BANNER_MS = 1600;
 /** Пауза между гибелью и экраном проигрыша — успеть увидеть, что случилось. */
@@ -74,6 +85,11 @@ const DEATH_PAUSE_MS = 600;
 const DANGER_ZONE = CELL * 1.5;
 /** Прозрачность красной полосы, пока конь далеко от неё. */
 const BAND_ALPHA = 0.72;
+/** Видимая высота панели проигрыша. */
+const SHEET_HEIGHT = 560;
+
+/** То, что срубило коня: линия удара и фигура — или красная полоса, если догнал экран. */
+type Culprit = Phaser.GameObjects.Graphics | Phaser.GameObjects.Image | Phaser.GameObjects.Rectangle;
 
 /**
  * ready   — ждём первый ход, экран стоит;
@@ -134,6 +150,8 @@ export class GameScene extends Phaser.Scene {
   private pieceViews = new Map<string, Phaser.GameObjects.Image>();
   /** Все объекты каждого ряда — чтобы удалять ряды, уехавшие под экран. */
   private rowViews = new Map<number, Phaser.GameObjects.GameObject[]>();
+  /** Виновники гибели — на экране проигрыша их поднимаем над затемнением, чтобы было видно, что случилось. */
+  private culprits: Culprit[] = [];
 
   constructor() {
     super('GameScene');
@@ -169,6 +187,7 @@ export class GameScene extends Phaser.Scene {
     this.hintViews = [];
     this.pieceViews = new Map();
     this.rowViews = new Map();
+    this.culprits = [];
 
     this.renderScale = this.scale.width / GAME_WIDTH;
     this.pieceScale = (CELL * PIECE_SIZE) / PIECE_TEXTURE_SIZE;
@@ -419,7 +438,10 @@ export class GameScene extends Phaser.Scene {
     return knightMoves({ col: this.knightCol, row: this.knightRow }, this.board.rowCount);
   }
 
-  /** Точки на пустых клетках и кольца вокруг фигур, которые можно взять. Опасность не показываем. */
+  /**
+   * Точки на пустых клетках и кольца вокруг фигур, которые можно взять. Опасность не показываем.
+   * До первого хода точки пульсируют — так видно, куда нажимать.
+   */
   private showMoves(): void {
     this.clearMoves();
     for (const move of this.legalMoves()) {
@@ -430,9 +452,20 @@ export class GameScene extends Phaser.Scene {
           : this.add.circle(x, y, CELL * 0.14, COLOR.mark, 0.25);
       this.moveMarks.push(mark.setDepth(DEPTH.marks));
     }
+    if (this.state === 'ready') {
+      this.tweens.add({
+        targets: this.moveMarks,
+        scale: 1.35,
+        duration: 520,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut',
+      });
+    }
   }
 
   private clearMoves(): void {
+    this.tweens.killTweensOf(this.moveMarks);
     for (const mark of this.moveMarks) mark.destroy();
     this.moveMarks = [];
   }
@@ -590,15 +623,17 @@ export class GameScene extends Phaser.Scene {
     this.state = 'dying';
     this.clearMoves();
     const knightAt = this.cellCenter({ col: this.knightCol, row: this.knightRow });
-    attackLine(this, this.cellCenter(attacker), knightAt, COLOR.danger, DEPTH.marks);
+    this.culprits = [attackLine(this, this.cellCenter(attacker), knightAt, COLOR.danger, DEPTH.marks)];
 
     const title = KILLED_BY[attacker.type];
+    const rule = RULE[attacker.type];
     const view = this.pieceViews.get(cellKey(attacker.col, attacker.row));
     if (!view) {
-      this.knightDies(knightAt, title);
+      this.knightDies(knightAt, title, rule);
       return;
     }
 
+    this.culprits.push(view);
     const distance = Math.max(
       Math.abs(attacker.col - this.knightCol),
       Math.abs(attacker.row - this.knightRow),
@@ -611,7 +646,7 @@ export class GameScene extends Phaser.Scene {
       delay: MOVE_MS + CAPTURE_DELAY_MS,
       duration: distance * CAPTURE_MS_PER_CELL + 120,
       ease: 'Quad.easeIn',
-      onComplete: () => this.knightDies(knightAt, title),
+      onComplete: () => this.knightDies(knightAt, title, rule),
     });
   }
 
@@ -619,12 +654,14 @@ export class GameScene extends Phaser.Scene {
   private screenCaughtKnight(): void {
     this.clearMoves();
     this.band.setAlpha(1);
-    this.knightDies({ x: this.knight.x, y: this.knight.y }, 'Экран догнал коня');
+    this.culprits = [this.band];
+    this.knightDies({ x: this.knight.x, y: this.knight.y }, SCREEN_DEATH.title, SCREEN_DEATH.rule);
   }
 
   /** Гибель коня: осколки, тряска, красная вспышка, звук — и через мгновение экран проигрыша. */
-  private knightDies(at: Point, title: string): void {
+  private knightDies(at: Point, title: string, rule: string): void {
     this.state = 'dying';
+    const screenY = at.y - this.cameras.main.scrollY;
     this.knight.setVisible(false);
     burst(this, at, COLOR.knightBits, 16);
     this.cameras.main.shake(180, 0.012);
@@ -635,7 +672,7 @@ export class GameScene extends Phaser.Scene {
       from: 0,
       to: 1,
       duration: DEATH_PAUSE_MS,
-      onComplete: () => this.gameOver(title),
+      onComplete: () => this.gameOver(title, rule, screenY),
     });
   }
 
@@ -783,31 +820,73 @@ export class GameScene extends Phaser.Scene {
 
   // ───────────── Конец игры ─────────────
 
-  private gameOver(reason: string): void {
+  /**
+   * Экран проигрыша: доска притемнена, а виновник гибели (линия удара и фигура или красная полоса)
+   * поверх затемнения. Панель выезжает с той половины экрана, где коня не было, — место гибели
+   * остаётся на виду. На панели: что случилось, почему (правило фигуры), счёт, рекорд и «Ещё раз».
+   */
+  private gameOver(title: string, rule: string, deathScreenY: number): void {
     this.state = 'over';
     this.clearMoves();
     for (const part of this.pauseButton) part.setVisible(false); // после проигрыша пауза не нужна
     this.restartAllowedAt = this.time.now + RESTART_DELAY_MS;
+    const previousBest = this.loadBestScore();
     const best = this.saveBestScore();
+    const isRecord = this.score > previousBest;
 
     this.add
-      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, COLOR.panel, 0.85)
+      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2, GAME_WIDTH, GAME_HEIGHT, 0x000000, 0.45)
       .setScrollFactor(0)
-      .setDepth(DEPTH.ui - 0.01);
-    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.36, reason, 52);
-    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.46, `Счёт: ${this.score}`, 46);
-    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.52, `Рекорд: ${best}`, 34, COLOR.textMuted);
-    this.uiText(GAME_WIDTH / 2, GAME_HEIGHT * 0.64, 'Тапни, чтобы начать заново', 34);
+      .setDepth(DEPTH.dim);
+    this.culprits.forEach((view, i) => view.setDepth(DEPTH.culprit + i * 0.01));
+
+    // Конь погиб в нижней половине экрана — панель сверху, иначе снизу
+    const fromTop = deathScreenY > GAME_HEIGHT / 2;
+    const top = fromTop ? 0 : GAME_HEIGHT - SHEET_HEIGHT;
+    // Панель на 40 px длиннее и заходит за край экрана: скруглены только углы со стороны доски
+    const panelY = top + SHEET_HEIGHT / 2 + (fromTop ? -20 : 20);
+    const button = createButton(this, GAME_WIDTH / 2, top + 450, 440, 'Ещё раз', 'primary', DEPTH.ui, this.renderScale);
+    const sheet: Array<Phaser.GameObjects.Rectangle | Phaser.GameObjects.Text> = [
+      createPanel(this, GAME_WIDTH / 2, panelY, GAME_WIDTH, SHEET_HEIGHT + 40, DEPTH.ui - 0.01),
+      this.uiText(GAME_WIDTH / 2, top + 64, title, 42),
+      this.uiText(GAME_WIDTH / 2, top + 112, rule, 26, COLOR.textMuted),
+      this.uiText(GAME_WIDTH / 2, top + 176, 'СЧЁТ', 22, COLOR.textMuted),
+      this.uiText(GAME_WIDTH / 2, top + 240, String(this.score), 96),
+      this.uiText(
+        GAME_WIDTH / 2,
+        top + 318,
+        isRecord ? 'Новый рекорд!' : `Рекорд: ${best}`,
+        30,
+        isRecord ? COLOR.accentCss : COLOR.textMuted,
+      ),
+      button.bg,
+      button.label,
+    ];
+    // Панель выезжает из-за своего края экрана
+    const offset = fromTop ? -(SHEET_HEIGHT + 60) : SHEET_HEIGHT + 60;
+    for (const view of sheet) {
+      const y = view.y;
+      view.y = y + offset;
+      this.tweens.add({ targets: view, y, duration: 360, ease: 'Back.easeOut' });
+    }
   }
 
   /** Рекорд хранится в браузере игрока. localStorage бывает недоступен — тогда просто без рекорда. */
-  private saveBestScore(): number {
+  private loadBestScore(): number {
     try {
-      const best = Math.max(this.score, Number(localStorage.getItem(BEST_SCORE_KEY)) || 0);
-      localStorage.setItem(BEST_SCORE_KEY, String(best));
-      return best;
+      return Number(localStorage.getItem(BEST_SCORE_KEY)) || 0;
     } catch {
-      return this.score;
+      return 0;
     }
+  }
+
+  private saveBestScore(): number {
+    const best = Math.max(this.score, this.loadBestScore());
+    try {
+      localStorage.setItem(BEST_SCORE_KEY, String(best));
+    } catch {
+      // localStorage недоступен — просто не запоминаем
+    }
+    return best;
   }
 }

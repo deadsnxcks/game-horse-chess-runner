@@ -1,5 +1,5 @@
 /**
- * Кнопки в одном стиле: скруглённые углы, главная кнопка — акцентного цвета, остальные — тёмные.
+ * Кнопки и панели в одном стиле: скруглённые углы, тёмные панели, акцентная главная кнопка.
  * Все элементы привязаны к экрану (scrollFactor 0) — они не уезжают вместе с доской.
  */
 import Phaser from 'phaser';
@@ -43,4 +43,21 @@ export function createButton(
     .setScrollFactor(0)
     .setDepth(depth);
   return { bg, label };
+}
+
+/** Непрозрачная панель со скруглёнными углами и тонкой рамкой: доска сквозь неё не просвечивает. */
+export function createPanel(
+  scene: Phaser.Scene,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  depth: number,
+): Phaser.GameObjects.Rectangle {
+  return scene.add
+    .rectangle(x, y, width, height, COLOR.panel)
+    .setRounded(36)
+    .setStrokeStyle(3, COLOR.panelEdge)
+    .setScrollFactor(0)
+    .setDepth(depth);
 }
