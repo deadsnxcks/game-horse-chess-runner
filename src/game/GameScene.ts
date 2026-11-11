@@ -93,6 +93,8 @@ const DEATH_PAUSE_MS = 600;
 const DANGER_ZONE = CELL * 1.5;
 /** Прозрачность красной полосы, пока конь далеко от неё. */
 const BAND_ALPHA = 0.72;
+/** Фигуры ряда-предпросмотра полупрозрачные: их уже видно, но они ещё не бьют. */
+const PREVIEW_ALPHA = 0.5;
 /** Видимая высота панели проигрыша. */
 const SHEET_HEIGHT = 560;
 
@@ -211,6 +213,7 @@ export class GameScene extends Phaser.Scene {
       .setScroll(0, 0);
 
     this.createRowsAhead();
+    this.updatePreviewPieces();
     this.createKnight();
     this.createHud();
     this.showMoves();
@@ -241,8 +244,16 @@ export class GameScene extends Phaser.Scene {
     this.createRowsAhead();
     this.removeRowsBelow();
     this.updateDangerBand();
+    this.updatePreviewPieces();
 
-    if (this.knightScreenY() > GAME_HEIGHT - DEATH_BAND) this.screenCaughtKnight();
+    if (this.knightScreenY() > GAME_HEIGHT - DEATH_BAND) {
+      this.screenCaughtKnight();
+      return;
+    }
+    // Фигура въехала в зону удара, а конь стоит на битой клетке — рубит, как и сразу после хода.
+    // Иначе под ударом можно было стоять: удар проверялся только в момент прыжка.
+    const attacker = this.findKnightAttacker();
+    if (attacker) this.knightCaptured(attacker);
   }
 
   /** Настройки текущей фазы: плотность и состав фигур, скорость экрана. Все — в constants.ts. */
@@ -356,6 +367,26 @@ export class GameScene extends Phaser.Scene {
   /** Нижний активный ряд: самый нижний, который целиком на экране. */
   private bottomActiveRow(): number {
     return Math.max(0, Math.ceil(-this.cameras.main.scrollY / CELL));
+  }
+
+  /** Фигура из зоны удара, которая бьёт клетку коня, — или null. Ряд-предпросмотр ещё не бьёт. */
+  private findKnightAttacker(): Attacker | null {
+    const knightAt = { col: this.knightCol, row: this.knightRow };
+    return findAttacker(this.board, knightAt, this.bottomActiveRow(), this.topActiveRow());
+  }
+
+  /**
+   * Фигуры выше зоны удара (ряд-предпросмотр) — полупрозрачные, в зоне удара — обычные.
+   * Так видно, какая фигура уже бьёт, а какая пока нет. Зона удара едет только вверх,
+   * поэтому хватает пересчитать несколько рядов у её верхней границы.
+   */
+  private updatePreviewPieces(): void {
+    const top = this.topActiveRow();
+    for (let row = top - 2; row <= top + 3; row++) {
+      for (let col = 0; col < COLS; col++) {
+        this.pieceViews.get(cellKey(col, row))?.setAlpha(row > top ? PREVIEW_ALPHA : 1);
+      }
+    }
   }
 
   /** Верхний активный ряд: целиком на экране, не под плашкой счёта и не ряд-предпросмотр. */
@@ -569,7 +600,7 @@ export class GameScene extends Phaser.Scene {
     else sfx.move();
 
     // 4. Ответ противника: если клетку коня бьёт видимая фигура — она рубит
-    const attacker = findAttacker(this.board, to, this.bottomActiveRow(), this.topActiveRow());
+    const attacker = this.findKnightAttacker();
     if (attacker) {
       this.knightCaptured(attacker);
     } else {
