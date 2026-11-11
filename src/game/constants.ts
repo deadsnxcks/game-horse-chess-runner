@@ -12,21 +12,27 @@ export const SCROLL_ACCEL = 0.4; // прибавка к скорости за к
 export const SCROLL_SPEED_MAX = 60; // потолок скорости в фазе 1 (в фазе 2 умножается на scrollMultiplier)
 
 // ── Фазы: всё, чем одна фаза игры отличается от другой ──
-export type Phase = 1 | 2;
+export type Phase = 1 | 2 | 3;
 
 export interface PhaseSettings {
   enemyChance: number; // шанс, что в клетке нового ряда стоит фигура
   /** Как часто встречается каждая фигура (относительные веса). */
   enemyWeights: Record<EnemyType, number>;
   scrollMultiplier: number; // во сколько раз быстрее едет экран
+  captureFreeze: number; // на сколько секунд взятие останавливает экран (0 — не останавливает)
 }
 
-/** Настройки каждой фазы. Фаза 2 — та же игра, но давление выше: экран быстрее, фигур больше. */
+/**
+ * Настройки каждой фазы. Фаза 2 — та же игра, но давление выше: экран быстрее, фигур больше.
+ * Фаза 3 «Охота» меняет не правила, а выгодный выбор: экран так быстр, что просто бежать вверх
+ * не успеваешь, зато каждое взятие останавливает экран. Фигуры из угрозы становятся добычей.
+ */
 export const PHASES: Record<Phase, PhaseSettings> = {
   1: {
     enemyChance: 0.16,
     enemyWeights: { pawn: 45, knight: 16, bishop: 20, rook: 12, queen: 7 },
     scrollMultiplier: 1,
+    captureFreeze: 0,
   },
   2: {
     enemyChance: 0.25,
@@ -34,11 +40,22 @@ export const PHASES: Record<Phase, PhaseSettings> = {
     // Было 5: на тесте игроки гибли сразу после 30 очков — экран догонял за 2–4 секунды.
     // При 2 экран заметно быстрее, но в фазе 2 можно продержаться 1–2 минуты.
     scrollMultiplier: 2,
+    captureFreeze: 0,
+  },
+  3: {
+    enemyChance: 0.3,
+    enemyWeights: { pawn: 30, knight: 16, bishop: 24, rook: 18, queen: 12 },
+    scrollMultiplier: 2.6,
+    captureFreeze: 2,
   },
 };
 
 /** Фаза 2 начинается, когда счёт достигает этого порога (по прогрессу игрока, а не по времени). */
 export const PHASE2_SCORE = 30;
+/** Фаза 3 «Охота» — с этого счёта. */
+export const PHASE3_SCORE = 80;
+/** Фаза 3: больше этого стоп-времени (секунд) взятиями не накопить. */
+export const FREEZE_MAX = 6;
 
 // ═════════════ Остальное ═════════════
 

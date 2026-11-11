@@ -17,6 +17,8 @@ export const COLOR = {
   textMuted: '#94a3b8',
   accent: 0xffb020, // главная кнопка, фаза 2, новый рекорд
   accentCss: '#ffb020',
+  freeze: 0x60a5fa, // фаза 3: экран стоит после взятия
+  freezeCss: '#93c5fd',
   onAccent: '#1a1206', // текст на акцентном фоне
   danger: 0xef4444, // линия удара, полоса внизу, вспышка гибели
   mark: 0x000000, // точки ходов — как на lichess
@@ -28,6 +30,7 @@ export const COLOR = {
 export const BOARD: Record<Phase, { light: number; dark: number; knightSquare: number }> = {
   1: { light: 0xf0d9b5, dark: 0xb58863, knightSquare: 0xcdd26a },
   2: { light: 0xf3cfc6, dark: 0xb8574d, knightSquare: 0xf6c344 },
+  3: { light: 0xdde3ee, dark: 0x5a6f99, knightSquare: 0x8be0a4 }, // «Охота»: холодная ночная доска
 };
 
 /** Слои отрисовки: что поверх чего. */

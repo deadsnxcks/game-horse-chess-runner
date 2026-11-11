@@ -12,7 +12,9 @@ import {
   GAME_WIDTH,
   HUD_HEIGHT,
   MOVE_MS,
+  FREEZE_MAX,
   PHASE2_SCORE,
+  PHASE3_SCORE,
   PHASES,
   PIECE_SIZE,
   PIECE_VALUE,
@@ -79,6 +81,12 @@ const SCREEN_DEATH = { title: 'Экран догнал коня', rule: 'Экр�
 
 /** Сколько висит баннер «ФАЗА 2», прежде чем растаять. */
 const PHASE_BANNER_MS = 1600;
+/** Подпись под «ФАЗА N» — что поменялось. */
+const PHASE_SUBTITLE: Record<Phase, string> = {
+  1: '',
+  2: 'Экран быстрее, фигур больше',
+  3: 'Охота: взятие останавливает экран',
+};
 /** Пауза между гибелью и экраном проигрыша — успеть увидеть, что случилось. */
 const DEATH_PAUSE_MS = 600;
 /** Ближе этого к красной полосе внизу полоса мигает — предупреждение. */
@@ -121,6 +129,8 @@ export class GameScene extends Phaser.Scene {
   private maxRow = START_ROW;
   private score = 0;
   private phase: Phase = 1;
+  /** Фаза 3: сколько ещё секунд экран стоит после взятия. */
+  private freezeLeft = 0;
   /** Игровое время в секундах: растёт только в update() в состоянии 'playing', на паузе стоит. */
   private elapsed = 0;
   /** Время браузера (this.time.now), после которого тап на экране проигрыша перезапускает игру. */
@@ -180,6 +190,7 @@ export class GameScene extends Phaser.Scene {
     this.maxRow = START_ROW;
     this.score = 0;
     this.phase = 1;
+    this.freezeLeft = 0;
     this.elapsed = 0;
     this.moveMarks = [];
     this.pauseViews = [];
@@ -223,7 +234,8 @@ export class GameScene extends Phaser.Scene {
 
     const seconds = delta / 1000;
     this.elapsed += seconds;
-    if (this.shouldEnterPhase2()) this.enterPhase2();
+    const next = this.nextPhase();
+    if (next) this.enterPhase(next);
 
     this.scrollCamera(seconds);
     this.createRowsAhead();
@@ -240,22 +252,25 @@ export class GameScene extends Phaser.Scene {
 
   // ───────────── Фазы ─────────────
 
-  /** Условие перехода в фазу 2. Единственное место в коде, которое его знает. */
-  private shouldEnterPhase2(): boolean {
-    return this.phase === 1 && this.score >= PHASE2_SCORE;
+  /** Пора ли в следующую фазу. Единственное место в коде, которое знает пороги. */
+  private nextPhase(): Phase | null {
+    if (this.phase === 1 && this.score >= PHASE2_SCORE) return 2;
+    if (this.phase === 2 && this.score >= PHASE3_SCORE) return 3;
+    return null;
   }
 
   /**
-   * Вход в фазу 2. Новые скорость экрана и плотность фигур отдельно включать не нужно:
-   * код читает их через this.settings, а он теперь возвращает PHASES[2].
+   * Вход в следующую фазу. Новые скорость экрана и плотность фигур отдельно включать не нужно:
+   * код читает их через this.settings, а он теперь возвращает PHASES[next].
    * Остальное — отклик, чтобы смену правил нельзя было не заметить:
-   * доска краснеет, вспышка, баннер, плашка фазы и звук.
+   * доска перекрашивается, вспышка, баннер, плашка фазы и звук.
    */
-  private enterPhase2(): void {
-    this.phase = 2;
-    this.recolorBoard(1, 2);
+  private enterPhase(next: Phase): void {
+    const from = this.phase;
+    this.phase = next;
+    this.recolorBoard(from, next);
     this.phaseChip.setFillStyle(COLOR.accent);
-    this.phaseText.setText('ФАЗА 2').setColor(COLOR.onAccent);
+    this.phaseText.setText(`ФАЗА ${next}`).setColor(COLOR.onAccent);
     this.tweens.add({
       targets: [this.phaseChip, this.phaseText],
       scale: 1.25,
@@ -265,7 +280,7 @@ export class GameScene extends Phaser.Scene {
     });
     this.cameras.main.flash(300, 255, 176, 32);
     sfx.phase();
-    this.showPhaseBanner();
+    this.showPhaseBanner(next);
   }
 
   /** Плавно перекрашиваем доску: светлые клетки — это фон камеры, тёмные — прямоугольники рядов. */
@@ -290,7 +305,7 @@ export class GameScene extends Phaser.Scene {
    * Надпись прямо под плашкой — поверх ряда-предпросмотра, где фигуры ещё не бьют,
    * поэтому она не прячет опасность. Тает сама, на паузе замирает вместе с остальными анимациями.
    */
-  private showPhaseBanner(): void {
+  private showPhaseBanner(phase: Phase): void {
     const y = HUD_HEIGHT + 66;
     const banner = [
       this.add
@@ -298,8 +313,8 @@ export class GameScene extends Phaser.Scene {
         .setRounded(28)
         .setStrokeStyle(4, COLOR.accent)
         .setScrollFactor(0),
-      this.uiText(GAME_WIDTH / 2, y - 20, 'ФАЗА 2', 56, COLOR.accentCss),
-      this.uiText(GAME_WIDTH / 2, y + 31, 'Экран быстрее, фигур больше', 26),
+      this.uiText(GAME_WIDTH / 2, y - 20, `ФАЗА ${phase}`, 56, COLOR.accentCss),
+      this.uiText(GAME_WIDTH / 2, y + 31, PHASE_SUBTITLE[phase], 26),
     ];
     for (const part of banner) part.setDepth(DEPTH.banner).setScale(0.6);
     this.tweens.add({ targets: banner, scale: 1, duration: 260, ease: 'Back.easeOut' });
@@ -537,6 +552,7 @@ export class GameScene extends Phaser.Scene {
     // 1. Взятие: прыгнул на фигуру — съел её
     const eaten = this.board.get(to.col, to.row);
     if (eaten) this.capturePiece(to, eaten);
+    if (eaten && this.settings.captureFreeze > 0) this.freezeScreen(to);
 
     // 2. Логику меняем сразу, картинку — короткой анимацией
     this.knightCol = to.col;
@@ -682,7 +698,9 @@ export class GameScene extends Phaser.Scene {
     const camera = this.cameras.main;
     const baseSpeed = Math.min(SCROLL_SPEED_MAX, SCROLL_SPEED_START + SCROLL_ACCEL * this.elapsed);
     const speed = baseSpeed * this.settings.scrollMultiplier;
-    camera.scrollY -= speed * seconds; // мир растёт вверх → камера едет в минус
+    // Фаза 3: после взятия экран стоит, пока не кончится стоп-время
+    if (this.freezeLeft > 0) this.freezeLeft = Math.max(0, this.freezeLeft - seconds);
+    else camera.scrollY -= speed * seconds; // мир растёт вверх → камера едет в минус
 
     // Конь ушёл высоко — подтягиваем экран, чтобы было видно, что впереди
     if (this.knightScreenY() < FOLLOW_LINE) {
@@ -691,8 +709,23 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Конь близко к нижнему краю — полоса мигает: предупреждение до того, как экран догонит. */
+  /** Фаза 3: взятие останавливает экран. Стоп-время копится, но не больше FREEZE_MAX. */
+  private freezeScreen(at: Cell): void {
+    this.freezeLeft = Math.min(FREEZE_MAX, this.freezeLeft + this.settings.captureFreeze);
+    const { x, y } = this.cellCenter(at);
+    floatText(this, { x, y: y + 40 }, `экран стоп ${Math.round(this.freezeLeft)} с`, COLOR.freezeCss, 34, this.renderScale);
+  }
+
+  /**
+   * Конь близко к нижнему краю — полоса мигает: предупреждение до того, как экран догонит.
+   * Пока экран стоит после взятия (фаза 3), полоса синяя: опасности нет.
+   */
   private updateDangerBand(): void {
+    this.band.setFillStyle(this.freezeLeft > 0 ? COLOR.freeze : COLOR.danger);
+    if (this.freezeLeft > 0) {
+      this.band.setAlpha(BAND_ALPHA);
+      return;
+    }
     const close = this.knightScreenY() > GAME_HEIGHT - DEATH_BAND - DANGER_ZONE;
     this.band.setAlpha(close ? BAND_ALPHA + (1 - BAND_ALPHA) * Math.sin(this.elapsed * 14) : BAND_ALPHA);
   }
