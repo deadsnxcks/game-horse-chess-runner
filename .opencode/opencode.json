@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "game-dev",
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "ask" },
+    { "action": "shell", "resource": "npm run typecheck*", "effect": "allow" },
+    { "action": "shell", "resource": "npm run build*", "effect": "allow" },
+    { "action": "shell", "resource": "npm run dev*", "effect": "allow" },
+    { "action": "shell", "resource": "npm run preview*", "effect": "allow" },
+    { "action": "shell", "resource": "npx playwright test*", "effect": "allow" },
+    { "action": "shell", "resource": "node .opencode/skills/horsechess-smoke/scripts/smoke.mjs*", "effect": "allow" },
+    { "action": "shell", "resource": "git status*", "effect": "allow" },
+    { "action": "shell", "resource": "git diff*", "effect": "allow" },
+    { "action": "shell", "resource": "git log*", "effect": "allow" },
+    { "action": "shell", "resource": "git show*", "effect": "allow" },
+    { "action": "external_directory", "resource": "*", "effect": "ask" }
+  ],
+  "policies": [
+    { "action": "tool.use", "resource": "shell:git push *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:git reset --hard *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:git clean *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:rm -rf *", "effect": "deny" },
+    { "action": "tool.use", "resource": "shell:rm -r *", "effect": "deny" }
+  ]
+}
