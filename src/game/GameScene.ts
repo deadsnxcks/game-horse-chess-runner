@@ -53,6 +53,7 @@ import {
 import { attackLine, burst, floatText, ring } from './effects';
 import { createButton, createPanel, type Button } from './ui';
 import { sfx } from './sound';
+import { track } from './analytics';
 
 /** Сколько рядов держим созданными выше верхнего края экрана. */
 const ROWS_AHEAD = 3;
@@ -279,6 +280,7 @@ export class GameScene extends Phaser.Scene {
   private enterPhase(next: Phase): void {
     const from = this.phase;
     this.phase = next;
+    track(`phase_${next}`);
     this.recolorBoard(from, next);
     this.phaseChip.setFillStyle(COLOR.accent);
     this.phaseText.setText(`ФАЗА ${next}`).setColor(COLOR.onAccent);
@@ -546,6 +548,7 @@ export class GameScene extends Phaser.Scene {
     if (this.state === 'over') {
       if (this.time.now >= this.restartAllowedAt) {
         sfx.click();
+        track('restart');
         this.scene.restart();
       }
       return;
@@ -577,6 +580,7 @@ export class GameScene extends Phaser.Scene {
     if (this.state === 'ready') {
       this.state = 'playing'; // экран поедет после первого хода
       this.hideFirstMoveHint();
+      track('first_move');
     }
     const scoreBefore = this.score;
 
@@ -668,6 +672,7 @@ export class GameScene extends Phaser.Scene {
   /** Фигура едет через доску и рубит коня — красная линия показывает, откуда пришёл удар. */
   private knightCaptured(attacker: Attacker): void {
     this.state = 'dying';
+    track('death', { cause: attacker.type, score: this.score });
     this.clearMoves();
     const knightAt = this.cellCenter({ col: this.knightCol, row: this.knightRow });
     this.culprits = [attackLine(this, this.cellCenter(attacker), knightAt, COLOR.danger, DEPTH.marks)];
@@ -700,6 +705,7 @@ export class GameScene extends Phaser.Scene {
   /** Экран догнал коня: та же гибель, только причина другая. */
   private screenCaughtKnight(): void {
     this.clearMoves();
+    track('death', { cause: 'screen', score: this.score });
     this.band.setAlpha(1);
     this.culprits = [this.band];
     this.knightDies({ x: this.knight.x, y: this.knight.y }, SCREEN_DEATH.title, SCREEN_DEATH.rule);
