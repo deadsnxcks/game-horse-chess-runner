@@ -15,10 +15,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # Сборка и загрузка артефакта — в одном job.
+  # Деплой — в отдельном: если upload и deploy идут подряд в одном job,
+  # deploy-pages иногда не успевает увидеть только что созданный артефакт
+  # (actions/deploy-pages#451).
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -44,6 +45,15 @@ jobs:
         with:
           path: ./dist
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
